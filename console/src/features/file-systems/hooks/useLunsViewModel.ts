@@ -123,7 +123,7 @@ const outDevicesUsedByLocalDisks =
     localDisks.length
       ? localDisks.find(
           (localDisk) =>
-            !localDisk.metadata?.name?.endsWith(disk.WWN.slice("uuid.".length))
+            !localDisk.metadata?.name?.endsWith(disk.WWN.slice(WWN_LENGTH * -1))
         )
       : true;
 
@@ -131,8 +131,9 @@ const toLun = (disk: DiscoveredDevice): Lun => {
   return {
     isSelected: false,
     path: disk.path,
-    wwn: disk.WWN.slice("uuid.".length),
-    // Note: Usage of 'GB' is intentional here
-    capacity: convert(disk.size, "B").to("GiB").toFixed(2) + " GB",
+    wwn: disk.WWN.slice(WWN_LENGTH * -1),
+    capacity: convert(disk.size, "B").to("GiB").toFixed(2) + " GiB",
   };
 };
+
+const WWN_LENGTH = 32;
