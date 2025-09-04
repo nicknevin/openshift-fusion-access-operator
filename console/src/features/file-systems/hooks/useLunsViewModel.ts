@@ -1,24 +1,24 @@
 import convert from "convert";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useStore } from "@/shared/store/provider";
-import type { State, Actions } from "@/shared/store/types";
+import type { Actions, State } from "@/shared/store/types";
 import { useFusionAccessTranslations } from "@/shared/hooks/useFusionAccessTranslations";
 import { useStorageNodesLvdrs } from "./useStorageNodesLvdrs";
 import { useWatchLocalDisk } from "@/shared/hooks/useWatchLocalDisk";
-import type { DiscoveredDevice } from "@/shared/types/fusion-access/LocalVolumeDiscoveryResult";
+import type {
+  DiscoveredDevice,
+  LocalVolumeDiscoveryResult,
+} from "@/shared/types/fusion-access/LocalVolumeDiscoveryResult";
 import type { LocalDisk } from "@/shared/types/ibm-spectrum-scale/LocalDisk";
-
-export interface Lun {
-  isSelected: boolean;
-  path: string;
-  wwn: string;
-  capacity: string;
-}
 
 export const useLunsViewModel = () => {
   const { t } = useFusionAccessTranslations();
 
   const [, dispatch] = useStore<State, Actions>();
+
+  const [luns, setLuns] = useState<Lun[]>([]);
+
+  const localDisks = useWatchLocalDisk();
 
   const storageNodesLvdrs = useStorageNodesLvdrs();
 
@@ -37,37 +37,26 @@ export const useLunsViewModel = () => {
     }
   }, [dispatch, storageNodesLvdrs.error, t]);
 
-  // We're taking just the first LVDR from the storage nodes because
-  // all of them MUST report the same disks as required during storage
-  // cluster creation
-  const [storageNodesLvdr] = useMemo(
-    () => storageNodesLvdrs.data ?? [],
-    [storageNodesLvdrs.data]
-  );
+  const sharedDiscoveredDevicesRepresentatives = useMemo(() => {
+    if (!storageNodesLvdrs.loaded || !Array.isArray(storageNodesLvdrs.data)) {
+      return [];
+    }
 
-  const localDisks = useWatchLocalDisk();
-
-  const [luns, setLuns] = useState<Lun[]>([]);
+    return getSharedDiscoveredDevicesRepresentatives(
+      storageNodesLvdrs.data
+    );
+  }, [storageNodesLvdrs.data, storageNodesLvdrs.loaded]);
 
   useEffect(() => {
-    const discoveredDevices = storageNodesLvdr?.status?.discoveredDevices ?? [];
-    if (
-      storageNodesLvdrs.loaded &&
-      localDisks.loaded &&
-      discoveredDevices.length
-    ) {
-      setLuns(
-        discoveredDevices
-          .filter(outDevicesUsedByLocalDisks(localDisks.data ?? []))
-          .map(toLun)
+    if (localDisks.loaded && storageNodesLvdrs.loaded) {
+      const newLuns = makeLuns(
+        sharedDiscoveredDevicesRepresentatives,
+        localDisks.data ?? []
       );
+      setLuns(newLuns);
     }
-  }, [
-    localDisks.data,
-    localDisks.loaded,
-    storageNodesLvdr?.status?.discoveredDevices,
-    storageNodesLvdrs.loaded,
-  ]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localDisks.loaded, storageNodesLvdrs.loaded]);
 
   const isSelected = useCallback(
     (lun: Lun) => luns.find((l) => l.path === lun.path)?.isSelected ?? false,
@@ -99,7 +88,8 @@ export const useLunsViewModel = () => {
   }, []);
 
   const data = luns;
-  const nodeName = storageNodesLvdr?.spec.nodeName;
+  const [nodeName] =
+    storageNodesLvdrs.data?.map((lvdr) => lvdr.spec.nodeName) ?? [];
   const loaded = storageNodesLvdrs.loaded && typeof nodeName === "string";
 
   return useMemo(
@@ -118,22 +108,142 @@ export const useLunsViewModel = () => {
 
 export type LunsViewModel = ReturnType<typeof useLunsViewModel>;
 
+export type WithNodeName<T> = T & { nodeName: string };
+
+export interface Lun {
+  isSelected: boolean;
+  nodeName: string;
+  path: string;
+  /**
+   * The last WWN_LENGTH characters of the device's WWN.
+   */
+  wwn: string;
+  /**
+   * The capacity of the LUN, expressed as a string in GiB units.
+   * Note: The value is obtained by calling lsblk, which returns sizes in GiB by default.
+   */
+  capacity: string;
+}
+
+/**
+ * The length of the WWN in characters. WWNs are commonly 16-byte values represeted in hexadecimal format.
+ * Therefore, every 2 characters in the WWN string represent 1 byte.
+ */
+const WWN_LENGTH = 32;
+
+/**
+ * Returns a predicate function to filter out discovered devices that are already used by any of the provided local disks.
+ *
+ * The returned function is intended for use with Array.prototype.filter on entries of discovered devices grouped by WWN.
+ * It returns true for a discovered device if:
+ *   - The localDisks array is empty (i.e., no disks to check against), or
+ *   - There is at least one local disk whose metadata.name does NOT end with the last WWN_LENGTH characters of the device's WWN.
+ *
+ * Note: This logic is used to exclude devices that are already associated with a local disk, based on a suffix match of the WWN.
+ *
+ * @param localDisks - Array of LocalDisk objects to check for existing usage.
+ * @returns A predicate function that takes a tuple [WWN, WithNodeName<DiscoveredDevice>[]] and returns a boolean indicating if the device is not used.
+ */
 const outDevicesUsedByLocalDisks =
-  (localDisks: LocalDisk[]) => (disk: DiscoveredDevice) =>
+  (localDisks: LocalDisk[]) =>
+  (dd: WithNodeName<DiscoveredDevice>): boolean =>
     localDisks.length
-      ? localDisks.find(
-          (localDisk) =>
-            !localDisk.metadata?.name?.endsWith(disk.WWN.slice(WWN_LENGTH * -1))
+      ? !localDisks.some((localDisk) =>
+          localDisk.metadata?.name?.endsWith(dd.WWN.slice(WWN_LENGTH * -1))
         )
       : true;
 
-const toLun = (disk: DiscoveredDevice): Lun => {
-  return {
-    isSelected: false,
-    path: disk.path,
-    wwn: disk.WWN.slice(WWN_LENGTH * -1),
-    capacity: convert(disk.size, "B").to("GiB").toFixed(2) + " GiB",
-  };
+/**
+ * Transforms a discovered device entry (with nodeName) into a Lun object suitable to be displayed by the UI.
+ *
+ * @param entry - A tuple where the second element is an array containing a discovered device object
+ *                 augmented with nodeName (i.e., [WWN, WithNodeName<DiscoveredDevice>[]]).
+ * @returns A Lun object with:
+ *   - isSelected: false by default,
+ *   - nodeName: the node name from the discovered device,
+ *   - path: the device path,
+ *   - wwn: the last WWN_LENGTH characters of the device's WWN,
+ *   - capacity: the device size formatted as a string in GiB (e.g., "10.00 GiB").
+ */
+const toLun = (dd: WithNodeName<DiscoveredDevice>): Lun => ({
+  isSelected: false,
+  nodeName: dd.nodeName,
+  path: dd.path,
+  wwn: dd.WWN.slice(WWN_LENGTH * -1),
+  capacity: convert(dd.size, "B").to("GiB").toFixed(2) + " GiB",
+});
+
+/**
+ * Returns a function that takes a DiscoveredDevice and returns a new object
+ * combining the device's properties with the nodeName from the given LocalVolumeDiscoveryResult.
+ *
+ * @param lvdr - The LocalVolumeDiscoveryResult containing the nodeName to attach.
+ * @returns A function that takes a DiscoveredDevice and returns a WithNodeName<DiscoveredDevice>.
+ */
+const toDiscoveredDeviceWithNodeName =
+  (lvdr: LocalVolumeDiscoveryResult) =>
+  (dd: DiscoveredDevice): WithNodeName<DiscoveredDevice> => ({
+    ...dd,
+    nodeName: lvdr.spec.nodeName,
+  });
+
+/**
+ * Combines discovered devices from multiple LocalVolumeDiscoveryResult objects,
+ * attaching the nodeName from each result to its discovered devices.
+ *
+ * @param storageNodesLvdrs - An array of LocalVolumeDiscoveryResult objects, each representing a node's discovered devices.
+ * @returns An array of discovered devices, each augmented with the corresponding nodeName.
+ */
+const makeDiscoveredDevicesWithNodeName = (
+  storageNodesLvdrs: LocalVolumeDiscoveryResult[]
+): WithNodeName<DiscoveredDevice>[] =>
+  storageNodesLvdrs.flatMap((lvdr) =>
+    (lvdr.status?.discoveredDevices ?? []).map(
+      toDiscoveredDeviceWithNodeName(lvdr)
+    )
+  );
+
+const makeLuns = (
+  ddsSharedByAllStorageNodes: WithNodeName<DiscoveredDevice>[],
+  localDisks: LocalDisk[]
+) => {
+  return ddsSharedByAllStorageNodes
+    .filter(outDevicesUsedByLocalDisks(localDisks))
+    .map(toLun);
 };
 
-const WWN_LENGTH = 32;
+/**
+ * Returns a representative discovered device for each WWN that is present on all storage nodes.
+ *
+ * This function processes an array of LocalVolumeDiscoveryResult objects (one per storage node),
+ * extracts all discovered devices (annotated with their nodeName), and groups them by their WWN.
+ * It then filters to only include groups (WWNs) that are present on every storage node (i.e., the group size
+ * matches the number of storage nodes). For each such group, it selects the first discovered device as the representative.
+ *
+ * @param storageNodesLvdrs - An array of LocalVolumeDiscoveryResult objects, each representing a storage node's discovered devices.
+ * @returns An array of WithNodeName<DiscoveredDevice> objects, each representing a device (by WWN) that is shared by all storage nodes.
+ */
+const getSharedDiscoveredDevicesRepresentatives = (
+  storageNodesLvdrs: LocalVolumeDiscoveryResult[]
+) => {
+  const discoveredDevicesWithNodeName =
+    makeDiscoveredDevicesWithNodeName(storageNodesLvdrs);
+
+  // Divide them into groups by WWN
+  const groupedByWwns = Object.groupBy(
+    discoveredDevicesWithNodeName,
+    (dd) => dd.WWN
+  );
+
+  // Filter out the groups that are not shared by all storage nodes
+  const onlySharedByAllStorageNodes = Object.entries(groupedByWwns).filter(
+    ([_, dds]) => Array.isArray(dds) && dds.length === storageNodesLvdrs.length
+  ) as [string, WithNodeName<DiscoveredDevice>[]][];
+
+  // Pick a representative discovered device from each group
+  const representativeDiscoveredDevices = onlySharedByAllStorageNodes.map(
+    ([_, dds]) => dds[0]
+  );
+
+  return representativeDiscoveredDevices;
+};
