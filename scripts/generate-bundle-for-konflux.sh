@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+set -eu -o pipefail
+
 # Source the environment values that contain the component image pullspecs coming from the  nudges
 for file in nudges/*.env
 do export $(cat $file)
@@ -19,8 +21,7 @@ operator-sdk generate bundle \
         --version $VERSION \
         --output-dir bundle \
         --channels development \
-        --default-channel development \
-        --use-image-digests
+        --default-channel development
 operator-sdk bundle validate ./bundle
 
 # Generate the bundle.Dockerfile with the label values for the components that
