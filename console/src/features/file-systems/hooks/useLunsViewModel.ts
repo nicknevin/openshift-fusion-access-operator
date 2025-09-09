@@ -25,7 +25,7 @@ export const useLunsViewModel = () => {
       dispatch({
         type: "global/addAlert",
         payload: {
-          title: t("Failed to load LocaDisks"),
+          title: t("Failed to load LocalDisks"),
           description: localDisks.error.message,
           variant: "danger",
           dismiss: () => dispatch({ type: "global/dismissAlert" }),
