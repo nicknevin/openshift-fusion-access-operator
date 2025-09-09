@@ -14,11 +14,27 @@ import type { LocalDisk } from "@/shared/types/ibm-spectrum-scale/LocalDisk";
 export const useLunsViewModel = () => {
   const { t } = useFusionAccessTranslations();
 
-  const [, dispatch] = useStore<State, Actions>();
-
   const [luns, setLuns] = useState<Lun[]>([]);
 
+  const [, dispatch] = useStore<State, Actions>();
+
   const localDisks = useWatchLocalDisk();
+
+  useEffect(() => {
+    if (localDisks.error) {
+      dispatch({
+        type: "global/addAlert",
+        payload: {
+          title: t("Failed to load LocaDisks"),
+          description: localDisks.error.message,
+          variant: "danger",
+          dismiss: () => dispatch({ type: "global/dismissAlert" }),
+        },
+      });
+    } else {
+      // TODO: Handle auto-dismiss when error is gone.
+    }
+  }, [dispatch, localDisks.error, t]);
 
   const storageNodesLvdrs = useStorageNodesLvdrs();
 
@@ -32,31 +48,38 @@ export const useLunsViewModel = () => {
           ),
           description: storageNodesLvdrs.error.message,
           variant: "danger",
+          dismiss: () => dispatch({ type: "global/dismissAlert" }),
         },
       });
+    } else {
+      // TODO: Handle auto-dismiss when error is gone.
     }
   }, [dispatch, storageNodesLvdrs.error, t]);
 
-  const sharedDiscoveredDevicesRepresentatives = useMemo(() => {
-    if (!storageNodesLvdrs.loaded || !Array.isArray(storageNodesLvdrs.data)) {
-      return [];
-    }
-
-    return getSharedDiscoveredDevicesRepresentatives(
-      storageNodesLvdrs.data
-    );
-  }, [storageNodesLvdrs.data, storageNodesLvdrs.loaded]);
-
   useEffect(() => {
-    if (localDisks.loaded && storageNodesLvdrs.loaded) {
-      const newLuns = makeLuns(
-        sharedDiscoveredDevicesRepresentatives,
-        localDisks.data ?? []
-      );
-      setLuns(newLuns);
+    if (
+      !localDisks.loaded ||
+      localDisks.data === null ||
+      !storageNodesLvdrs.loaded ||
+      storageNodesLvdrs.data === null
+    ) {
+      return;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [localDisks.loaded, storageNodesLvdrs.loaded]);
+
+    const sharedDiscoveredDevicesRepresentatives =
+      getSharedDiscoveredDevicesRepresentatives(storageNodesLvdrs.data);
+
+    const newLuns = makeLuns(
+      sharedDiscoveredDevicesRepresentatives,
+      localDisks.data
+    );
+    setLuns(newLuns);
+  }, [
+    localDisks.data,
+    localDisks.loaded,
+    storageNodesLvdrs.data,
+    storageNodesLvdrs.loaded,
+  ]);
 
   const isSelected = useCallback(
     (lun: Lun) => luns.find((l) => l.path === lun.path)?.isSelected ?? false,
@@ -88,21 +111,18 @@ export const useLunsViewModel = () => {
   }, []);
 
   const data = luns;
-  const [nodeName] =
-    storageNodesLvdrs.data?.map((lvdr) => lvdr.spec.nodeName) ?? [];
-  const loaded = storageNodesLvdrs.loaded && typeof nodeName === "string";
+  const loaded = storageNodesLvdrs.loaded && localDisks.loaded;
 
   return useMemo(
     () =>
       ({
         data,
         loaded,
-        nodeName,
         isSelected,
         setSelected,
         setAllSelected,
       }) as const,
-    [data, isSelected, loaded, nodeName, setAllSelected, setSelected]
+    [data, isSelected, loaded, setAllSelected, setSelected]
   );
 };
 
@@ -114,9 +134,6 @@ export interface Lun {
   isSelected: boolean;
   nodeName: string;
   path: string;
-  /**
-   * The last WWN_LENGTH characters of the device's WWN.
-   */
   wwn: string;
   /**
    * The capacity of the LUN, expressed as a string in GiB units.
@@ -126,18 +143,12 @@ export interface Lun {
 }
 
 /**
- * The length of the WWN in characters. WWNs are commonly 16-byte values represeted in hexadecimal format.
- * Therefore, every 2 characters in the WWN string represent 1 byte.
- */
-const WWN_LENGTH = 32;
-
-/**
  * Returns a predicate function to filter out discovered devices that are already used by any of the provided local disks.
  *
  * The returned function is intended for use with Array.prototype.filter on entries of discovered devices grouped by WWN.
  * It returns true for a discovered device if:
  *   - The localDisks array is empty (i.e., no disks to check against), or
- *   - There is at least one local disk whose metadata.name does NOT end with the last WWN_LENGTH characters of the device's WWN.
+ *   - There is at least one local disk whose metadata.name does NOT match the device's WWN.
  *
  * Note: This logic is used to exclude devices that are already associated with a local disk, based on a suffix match of the WWN.
  *
@@ -148,9 +159,7 @@ const outDevicesUsedByLocalDisks =
   (localDisks: LocalDisk[]) =>
   (dd: WithNodeName<DiscoveredDevice>): boolean =>
     localDisks.length
-      ? !localDisks.some((localDisk) =>
-          localDisk.metadata?.name?.endsWith(dd.WWN.slice(WWN_LENGTH * -1))
-        )
+      ? !localDisks.some((localDisk) => localDisk.metadata?.name === dd.WWN)
       : true;
 
 /**
@@ -162,14 +171,14 @@ const outDevicesUsedByLocalDisks =
  *   - isSelected: false by default,
  *   - nodeName: the node name from the discovered device,
  *   - path: the device path,
- *   - wwn: the last WWN_LENGTH characters of the device's WWN,
+ *   - wwn: the device's WWN,
  *   - capacity: the device size formatted as a string in GiB (e.g., "10.00 GiB").
  */
 const toLun = (dd: WithNodeName<DiscoveredDevice>): Lun => ({
   isSelected: false,
   nodeName: dd.nodeName,
   path: dd.path,
-  wwn: dd.WWN.slice(WWN_LENGTH * -1),
+  wwn: dd.WWN,
   capacity: convert(dd.size, "B").to("GiB").toFixed(2) + " GiB",
 });
 
