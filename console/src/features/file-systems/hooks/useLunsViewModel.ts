@@ -158,9 +158,7 @@ export interface Lun {
 const outDevicesUsedByLocalDisks =
   (localDisks: LocalDisk[]) =>
   (dd: WithNodeName<DiscoveredDevice>): boolean =>
-    localDisks.length
-      ? !localDisks.some((localDisk) => localDisk.metadata?.name === dd.WWN)
-      : true;
+    !localDisks.some((localDisk) => localDisk.metadata?.name === dd.WWN);
 
 /**
  * Transforms a discovered device entry (with nodeName) into a Lun object suitable to be displayed by the UI.
@@ -250,9 +248,5 @@ const getSharedDiscoveredDevicesRepresentatives = (
   ) as [string, WithNodeName<DiscoveredDevice>[]][];
 
   // Pick a representative discovered device from each group
-  const representativeDiscoveredDevices = onlySharedByAllStorageNodes.map(
-    ([_, dds]) => dds[0]
-  );
-
-  return representativeDiscoveredDevices;
+  return onlySharedByAllStorageNodes.map(([_, dds]) => dds[0]);
 };
