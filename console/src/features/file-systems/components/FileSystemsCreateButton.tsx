@@ -20,21 +20,21 @@ export const FileSystemsCreateButton: React.FC<CreateFileSystemButtonProps> = (
   useEffect(() => {
     if (daemon.loaded && Array.isArray(daemon.data) && daemon.data.length > 0) {
       const [daemonData] = daemon.data;
-      const daemonStatus =
-        daemonData.status?.conditions
-          ?.filter((condition) => condition.type == "Healthy")
-          .filter((condition) => condition.status === "True") ?? [];
+      const daemonStatus = daemonData.status?.conditions?.find(
+        (condition) =>
+          condition.type == "Healthy" && condition.status === "True"
+      );
 
-      setIsDaemonHealthy(daemonStatus.length === 1);
+      setIsDaemonHealthy(typeof daemonStatus !== "undefined");
     }
-  }, [daemon.loaded, daemon.data, isDaemonHealthy]);
+  }, [daemon.loaded, daemon.data]);
 
   return (
     <>
       <Button
         aria-describedby="create-file-system-tooltip"
         {...otherProps}
-        isDisabled={isDisabled || !isDaemonHealthy}
+        isAriaDisabled={isDisabled || !isDaemonHealthy}
         variant="primary"
         ref={tooltipRef}
       >

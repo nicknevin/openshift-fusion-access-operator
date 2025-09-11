@@ -5,7 +5,7 @@ import type { Daemon } from "@/shared/types/ibm-spectrum-scale/Daemon";
 export const useWatchDaemon = (
   options: Omit<
     WatchK8sResource,
-    "groupVersionKind" | "namespaced" | "isList"
+    "groupVersionKind" | "namespaced" | "namespace" | "isList"
   > = {}
 ) =>
   useNormalizedK8sWatchResource<Daemon>({
