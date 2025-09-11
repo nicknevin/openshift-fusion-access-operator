@@ -67,6 +67,7 @@ func init() {
 
 	utilruntime.Must(kmmv1beta1.AddToScheme(scheme))
 
+	utilruntime.Must(fusionv1alpha.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -153,6 +154,13 @@ func main() {
 			setupLog.Error(err, "unable to create webhook", "webhook", "KMMPod")
 			os.Exit(1)
 		}
+	}
+	if err = (&controller.FileSystemClaimReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "FileSystemClaim")
+		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder
 
