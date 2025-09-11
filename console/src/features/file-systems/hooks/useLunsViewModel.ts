@@ -66,14 +66,18 @@ export const useLunsViewModel = () => {
       return;
     }
 
-    const sharedDiscoveredDevicesRepresentatives =
-      getSharedDiscoveredDevicesRepresentatives(storageNodesLvdrs.data);
+    const newLuns = makeLuns(storageNodesLvdrs.data, localDisks.data);
 
-    const newLuns = makeLuns(
-      sharedDiscoveredDevicesRepresentatives,
-      localDisks.data
-    );
-    setLuns(newLuns);
+    setLuns((currentLuns) => {
+      const currentlySelectedLunsWwns = new Set(
+        currentLuns.filter((l) => l.isSelected).map((l) => l.wwn)
+      );
+
+      return newLuns.map((lun) => ({
+        ...lun,
+        isSelected: currentlySelectedLunsWwns.has(lun.wwn),
+      }));
+    });
   }, [
     localDisks.data,
     localDisks.loaded,
@@ -211,9 +215,11 @@ const makeDiscoveredDevicesWithNodeName = (
   );
 
 const makeLuns = (
-  ddsSharedByAllStorageNodes: WithNodeName<DiscoveredDevice>[],
+  storageNodesLvdrs: LocalVolumeDiscoveryResult[],
   localDisks: LocalDisk[]
 ) => {
+  const ddsSharedByAllStorageNodes =
+    getSharedDiscoveredDevicesRepresentatives(storageNodesLvdrs);
   return ddsSharedByAllStorageNodes
     .filter(outDevicesUsedByLocalDisks(localDisks))
     .map(toLun);
