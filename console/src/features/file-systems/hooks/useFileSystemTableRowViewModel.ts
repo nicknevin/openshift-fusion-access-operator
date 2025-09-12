@@ -113,12 +113,13 @@ export const useFileSystemTableRowViewModel = (fileSystem: FileSystem) => {
         return {
           status: "creating",
           title: t("Creating"),
-          description: {
-            Success: successCondition?.message,
-            ...(healthyCondition?.reason !== "NotReported" && {
-              Healthy: healthyCondition?.message,
-            }),
-          },
+          // TODO(jkilzi): Disabled to address OCPNAS-257
+          // description: {
+          //   Success: successCondition?.message,
+          //   ...(healthyCondition?.reason !== "NotReported" && {
+          //     Healthy: healthyCondition?.message,
+          //   }),
+          // },
           Icon: InProgressIcon,
         };
       case successCondition?.reason === "Created" &&
