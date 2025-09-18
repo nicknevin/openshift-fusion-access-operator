@@ -353,10 +353,17 @@ func GetInstallPath(cnsaVersion string) (string, error) {
 }
 
 func IsExternalManifestURLAllowed(url string) bool {
-	const allowedPrefix = "https://raw.githubusercontent.com/openshift-storage-scale"
-	url = strings.TrimSpace(url)
-	url = strings.ToLower(url)
-	return strings.HasPrefix(url, allowedPrefix)
+	allowedPrefixes := []string{
+		"https://raw.githubusercontent.com/openshift-storage-scale",
+		"https://raw.github.ibm.com/ibmspectrumscale/ibm-spectrum-scale-container-native",
+	}
+	url = strings.ToLower(strings.TrimSpace(url))
+	for _, prefix := range allowedPrefixes {
+		if strings.HasPrefix(url, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeDockerConfigJSON(destRaw, srcRaw []byte) ([]byte, error) {
