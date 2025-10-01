@@ -11,6 +11,8 @@ spec:
     kind: FileSystemClaim
     listKind: FileSystemClaimList
     plural: filesystemclaims
+    shortNames:
+    - fsc
     singular: filesystemclaim
   scope: Namespaced
   versions:
