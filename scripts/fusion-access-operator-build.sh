@@ -45,7 +45,7 @@ wait_for_resource() {
 
 apply_subscription() {
     oc delete -n ${NS} subscription/${OPERATOR} || /bin/true
-    oc delete catalogsource/test-openshift-fusion-access-operator || /bin/true
+    oc delete catalogsource/$CATALOGSOURCE || /bin/true
     oc apply -f - <<EOF
     apiVersion: v1
     kind: Namespace
