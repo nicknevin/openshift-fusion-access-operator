@@ -39,8 +39,14 @@ type FileSystemClaimSpec struct {
 
 // FileSystemClaimStatus defines the observed state of FileSystemClaim.
 type FileSystemClaimStatus struct {
-	// Important: Run "make" to regenerate code after modifying this file
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+    // Overall conditions
+    Conditions []metav1.Condition `json:"conditions,omitempty"`
+    
+    // Individual LocalDisk statuses
+    LocalDisks map[string][]metav1.Condition `json:"localDisks,omitempty"`
+    // FileSystem []metav1.Condition `json:"fileSystem,omitempty"`
+	// StorageClass []metav1.Condition `json:"storageClass,omitempty"`
+
 }
 
 // +kubebuilder:object:root=true
