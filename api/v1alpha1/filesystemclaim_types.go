@@ -44,8 +44,7 @@ type FileSystemClaimStatus struct {
     
     // Individual LocalDisk statuses
     LocalDisks map[string][]metav1.Condition `json:"localDisks,omitempty"`
-    // FileSystem []metav1.Condition `json:"fileSystem,omitempty"`
-	// StorageClass []metav1.Condition `json:"storageClass,omitempty"`
+    FileSystem []metav1.Condition `json:"fileSystem,omitempty"`
 
 }
 
