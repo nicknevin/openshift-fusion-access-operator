@@ -184,34 +184,11 @@ func (r *FileSystemClaimReconciler) handleFileSystemClaimRequest(ctx context.Con
 	}
 
 	// Add initial overall status condition
-	fsc.Status.Conditions = utils.UpdateCondition(fsc.Status.Conditions, ConditionTypeReady, metav1.ConditionFalse, ReasonProvisioningInProgress, "Provisioning in progress", fsc.Generation)
-	if statusErr := r.Status().Update(ctx, fsc); statusErr != nil {
-		logger.Error(statusErr, "Failed to update status after initial condition")
-		return ctrl.Result{}, statusErr
+	if fsc.Status.Conditions == nil {
+		// This means the FSC is new and has no conditions
+		fsc.Status.Conditions = utils.UpdateCondition(fsc.Status.Conditions, ConditionTypeReady, metav1.ConditionFalse, ReasonProvisioningInProgress, "Provisioning in progress", fsc.Generation)
 	}
-
-    // Step 1: Validate nodes
-    if !r.isConditionTrue(fsc, ConditionTypeNodeValidated) {
-	// Validate node exists in the cluster
-		err := r.validateNode(ctx, fsc)
-		if err != nil {
-			logger.Error(err, "Node validation failed")
-			fsc.Status.Conditions = utils.UpdateCondition(fsc.Status.Conditions, ConditionTypeNodeValidated, metav1.ConditionFalse, ReasonNodeValidationFailed, err.Error(), fsc.Generation)
-			fsc.Status.Conditions = utils.UpdateCondition(fsc.Status.Conditions, ConditionTypeReady, metav1.ConditionFalse, ReasonProvisioningFailed, "Node validation failed", fsc.Generation)
-			if statusErr := r.Status().Update(ctx, fsc); statusErr != nil {
-				logger.Error(statusErr, "Failed to update status after Node validation failure")
-				return ctrl.Result{}, statusErr
-			}
-			return ctrl.Result{RequeueAfter: time.Minute}, nil
-		}
-
-		fsc.Status.Conditions = utils.UpdateCondition(fsc.Status.Conditions, ConditionTypeNodeValidated, metav1.ConditionTrue, ReasonNodeValidationSucceeded, "Node/s validation succeeded", fsc.Generation)
-		if statusErr := r.Status().Update(ctx, fsc); statusErr != nil {
-			logger.Error(statusErr, "Failed to update status after Node validation success")
-			return ctrl.Result{}, statusErr
-		}
-		return ctrl.Result{Requeue: true}, nil
-    }
+	
 
 	// Step 2: Validate devices
 	if !r.isConditionTrue(fsc, ConditionTypeDeviceValidated) {
@@ -493,55 +470,10 @@ func (r *FileSystemClaimReconciler) handleDeletion(ctx context.Context, fsc *fus
 
 
 // VALIDATION FUNCTIONS start here
-// validateNode checks if the specified node:
-// 1. is a node with the label scale.spectrum.ibm.com/role=storage
-// 2. is a node with the label node-role.kubernetes.io/worker
-// return a human readable error message.
-func (r *FileSystemClaimReconciler) validateNode(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) error {
-	logger := log.FromContext(ctx)
 
-	// Get unique nodes from LocalDisks
-	nodeMap := make(map[string]bool)
-	for _, localDisk := range fsc.Spec.LocalDisks {
-		nodeMap[localDisk.Node] = true
-	}
-
-	// Validate each unique node
-	for nodeName := range nodeMap {
-		// Using PartialObjectMetadata instead of corev1.Node to keep it light weight
-		node := &metav1.PartialObjectMetadata{}
-		node.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Node"))
-
-		err := r.Get(ctx, types.NamespacedName{Name: nodeName}, node)
-		if err != nil {
-			if errors.IsNotFound(err) {
-				return fmt.Errorf("node %s not found in cluster", nodeName)
-			}
-			return fmt.Errorf("failed to get node %s error: %w", nodeName, err)
-		}
-
-		// Check for required labels
-		labels := node.GetLabels()
-
-		// Check for scale.spectrum.ibm.com/role=storage label
-		if role, exists := labels[ScaleStorageRoleLabel]; !exists || role != ScaleStorageRoleValue {
-			return fmt.Errorf("node %s does not have required label %s=%s", nodeName, ScaleStorageRoleLabel, ScaleStorageRoleValue)
-		}
-
-		// Check for node-role.kubernetes.io/worker label
-		if _, exists := labels[WorkerNodeRoleLabel]; !exists {
-			return fmt.Errorf("node %s does not have required label %s", nodeName, WorkerNodeRoleLabel)
-		}
-
-		logger.Info("Node validation of node: %s successful for fsc: %s ", nodeName, fsc.Name)
-	}
-
-	return nil
-}
-
-// validateDevices checks if the specified devices are present in ALL LocalVolumeDiscoveryResult
+// validateDevices checks if the specified disks are present in ALL LocalVolumeDiscoveryResult
 // which ensures both the device is valid and shared across all nodes.
-// When this function is called, it is assumed that the node is valid.
+// When this function is called.
 // return a human readable error message.
 func (r *FileSystemClaimReconciler) validateDevices(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) error {
 	logger := log.FromContext(ctx)
@@ -593,29 +525,29 @@ func (r *FileSystemClaimReconciler) validateDevices(ctx context.Context, fsc *fu
 	}
 
 	// For each device, check if it exists in ALL LVDRs
-	for _, localDisk := range fsc.Spec.LocalDisks {
+	for _, disk := range fsc.Spec.Disks {
 		for nodeName, lvdr := range lvdrs {
 			// Check if DiscoveredDevices exists and is not empty
 			if len(lvdr.Status.DiscoveredDevices) == 0 {
-				return fmt.Errorf("no discovered devices available for node %s. "+
-					"Device: %s may be in use in another filesystem or is not "+
-					"shared across all nodes", nodeName, localDisk.Device)
+				return fmt.Errorf("no discovered disks available for node %s. "+
+					"Disk: %s may be in use in another filesystem or is not "+
+					"shared across all nodes", nodeName, disk)
 			}
 
-			deviceFound := false
-			for _, device := range lvdr.Status.DiscoveredDevices {
-				if device.Path == localDisk.Device {
-					deviceFound = true
+			diskFound := false
+			for _, discoveredDisk := range lvdr.Status.DiscoveredDevices {
+				if discoveredDisk.Path == disk {
+					diskFound = true
 					break
 				}
 			}
 
-			if !deviceFound {
+			if !diskFound {
 				return fmt.Errorf("device %s not found in LocalVolumeDiscoveryResult for node %s", localDisk.Device, nodeName)
 			}
 		}
 
-		logger.Info("Device validation successful", "device", localDisk.Device, "availableOnAllNodesWithWorkerAndstorageLabel", len(lvdrs))
+		logger.Info("Device validation successful", "disk", disk, "availableOnAllNodesWithWorkerAndstorageLabel", len(lvdrs))
 	}
 
 	return nil

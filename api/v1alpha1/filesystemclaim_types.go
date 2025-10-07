@@ -20,32 +20,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// LocalDisk represents a local disk specification for the file system claim
-type LocalDisk struct {
-	// Device represents the persistent name of the device. For eg, /dev/sda
-	Device string `json:"device"`
-	// Node represents the node where this disk is located
-	Node string `json:"node"`
-}
-
 // FileSystemClaimSpec defines the desired state of FileSystemClaim.
 type FileSystemClaimSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// LocalDisks is a list of local disks to be used for the file system
-	LocalDisks []LocalDisk `json:"localdisks,omitempty"`
+	// Disks is a list of device paths to be used for the file system. For example, ["/dev/sda", "/dev/sdb"]
+	Disks []string `json:"disks,omitempty"`
 }
 
 // FileSystemClaimStatus defines the observed state of FileSystemClaim.
 type FileSystemClaimStatus struct {
     // Overall conditions
     Conditions []metav1.Condition `json:"conditions,omitempty"`
-    
-    // Individual LocalDisk statuses
-    LocalDisks map[string][]metav1.Condition `json:"localDisks,omitempty"`
-    FileSystem []metav1.Condition `json:"fileSystem,omitempty"`
-
 }
 
 // +kubebuilder:object:root=true
