@@ -33,7 +33,7 @@ metadata:
   name: fusionaccess-object
   namespace: ibm-fusion-access
 spec:
-  storageScaleVersion: "v5.2.3.1"
+  storageScaleVersion: "v5.2.3.4"
   storageDeviceDiscovery:
     create: true
 ```
@@ -108,9 +108,9 @@ The operator is distributed through the OpenShift OperatorHub:
 ## Supported Versions
 
 The operator currently supports:
-- IBM Storage Scale v5.2.3.1
+- IBM Storage Scale v5.2.3.4
 - OpenShift 4.19 (Exclusively)
-- Architecture: x86_64, ppc64le, s390x
+- Architecture: x86_64
 
 ## Security Considerations
 

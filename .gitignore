@@ -39,9 +39,11 @@ bundle_tmp*/
 
 build/*
 bundle/*
+catalog/
 
 *Dockerfile
 .claude
+CLAUDE.md
 
 # govulncheck outputs
 govulncheck.results

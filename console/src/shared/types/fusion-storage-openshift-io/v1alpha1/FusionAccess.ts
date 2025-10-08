@@ -36,7 +36,7 @@ export interface FusionAccess {
     /**
      * Version of IBM Fusion installation manifest
      */
-    storageScaleVersion?: "v5.2.3.1";
+    storageScaleVersion?: "v5.2.3.4";
   };
   /**
    * FusionAccessStatus defines the observed state of FusionAccess

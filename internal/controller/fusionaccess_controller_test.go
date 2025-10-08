@@ -104,7 +104,7 @@ var _ = Describe("FusionAccess Controller", func() {
 					Namespace: "default",
 				},
 				Spec: fusionv1alpha.FusionAccessSpec{
-					StorageScaleVersion:  "v5.2.3.1",
+					StorageScaleVersion:  "v5.2.3.4",
 					LocalVolumeDiscovery: fusionv1alpha.StorageDeviceDiscovery{
 						// Create: false,
 					},
@@ -266,12 +266,12 @@ var _ = Describe("getIbmManifest", func() {
 		It("should return the install path", func() {
 			fusionObj := fusionv1alpha.FusionAccessSpec{
 				ExternalManifestURL: "",
-				StorageScaleVersion: "v5.2.3.1",
+				StorageScaleVersion: "v5.2.3.4",
 			}
 
 			path, err := getIbmManifest(fusionObj)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(path).To(Equal("../../files/v5.2.3.1/install.yaml"))
+			Expect(path).To(Equal("../../files/v5.2.3.4/install.yaml"))
 		})
 	})
 

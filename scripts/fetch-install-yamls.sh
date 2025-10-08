@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-VERSIONS=("v5.2.2.1" "v5.2.2.0" "v5.2.1.1")
+VERSIONS=("v5.2.3.4")
 
 RAW_FILE_URL="https://raw.githubusercontent.com/IBM/ibm-spectrum-scale-container-native"
 
