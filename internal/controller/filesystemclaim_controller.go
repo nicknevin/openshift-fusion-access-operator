@@ -20,14 +20,17 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,6 +44,7 @@ import (
 	fusionv1alpha1 "github.com/openshift-storage-scale/openshift-fusion-access-operator/api/v1alpha1"
 	"github.com/openshift-storage-scale/openshift-fusion-access-operator/internal/utils"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 )
 
 const (
@@ -87,6 +91,7 @@ const (
 	FileSystemGroup   = "scale.spectrum.ibm.com"
 	FileSystemVersion = "v1beta1"
 	FileSystemKind    = "Filesystem"
+	FileSystemList    = "FilesystemList"
 
 	// Node validation labels
 	ScaleStorageRoleLabel = "scale.spectrum.ibm.com/role"
@@ -114,23 +119,6 @@ func (r *FileSystemClaimReconciler) Reconcile(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// REQUEST CATEGORIES AND ASSUMPTIONS:
-	// Based on our bulletproof predicates, we can make the following assumptions:
-	//
-	// 1. FileSystemClaim Requests (Direct):
-	//    ✅ GUARANTEED: Namespace = "ibm-spectrum-scale", Resource exists, Valid request
-	//    ❓ UNKNOWN: Change type (create/update/delete), What changed (spec/status/metadata)
-	//
-	// 2. LocalDisk Requests (Via Watches):
-	//    ✅ GUARANTEED: Namespace = "ibm-spectrum-scale", Owned by FileSystemClaim (controlling owner)
-	//    ✅ GUARANTEED: Status/metadata change (NOT spec change), Generation unchanged, ResourceVersion changed
-	//    ❓ UNKNOWN: Which FileSystemClaim owns it, What status changed, LocalDisk state
-	//
-	// 3. FileSystem Requests (Via Watches):
-	//    ✅ GUARANTEED: Namespace = "ibm-spectrum-scale", Owned by FileSystemClaim (controlling owner)
-	//    ✅ GUARANTEED: Status/metadata change (NOT spec change), Generation unchanged, ResourceVersion changed
-	//    ❓ UNKNOWN: Which FileSystemClaim owns it, What status changed, FileSystem state
-
 	// Fetch the request
 	fsc := &fusionv1alpha1.FileSystemClaim{}
 	err := r.Get(ctx, req.NamespacedName, fsc)
@@ -139,539 +127,1082 @@ func (r *FileSystemClaimReconciler) Reconcile(
 		return ctrl.Result{}, err
 	}
 	logger.Info("Reconciling FileSystemClaim", "name", fsc.Name, "namespace", fsc.Namespace)
-	
-	// Handle deletion
-	if fsc.DeletionTimestamp != nil {
-		return r.handleDeletion(ctx, fsc)
-	}
 
-	// Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(fsc, FileSystemClaimFinalizer) {
-		controllerutil.AddFinalizer(fsc, FileSystemClaimFinalizer)
-		err := r.Update(ctx, fsc)
-		if err != nil {
-			logger.Error(err, "Failed to add finalizer")
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	// Add initial overall status condition
-	if fsc.Status.Conditions == nil {
-		// This means the FSC is new and has no conditions
-		fsc.Status.Conditions = utils.UpdateCondition(
-			fsc.Status.Conditions,
-			ConditionTypeReady,
-			metav1.ConditionFalse,
-			ReasonProvisioningInProgress,
-			"Provisioning in progress",
-			fsc.Generation,
-		)
-	}
-
-	// Validate disks
-	if !r.isConditionTrue(fsc, ConditionTypeDiskValidated) {
-		// Validate devices exist in LocalVolumeDiscoveryResult
-		err := r.validateDisks(ctx, fsc)
-		if err != nil {
-			logger.Error(err, "Disk validation failed")
-			// Update Ready condition
-			fsc.Status.Conditions = utils.UpdateCondition(
-				fsc.Status.Conditions,
-				ConditionTypeReady,
-				metav1.ConditionFalse,
-				ReasonValidationFailed,
-				err.Error(),
-				fsc.Generation,
-			)
-			// Update DiskValidated condition
-			fsc.Status.Conditions = utils.UpdateCondition(
-				fsc.Status.Conditions,
-				ConditionTypeDiskValidated,
-				metav1.ConditionFalse,
-				ReasonDiskValidationFailed,
-				err.Error(),
-				fsc.Generation,
-			)
-			if statusErr := r.Status().Update(ctx, fsc); statusErr != nil {
-				logger.Error(statusErr, "Failed to update status after Disk validation failure")
-				return ctrl.Result{}, statusErr
-			}
-			return ctrl.Result{RequeueAfter: time.Minute}, nil
-		}
-
-		// Update DiskValidated condition
-		fsc.Status.Conditions = utils.UpdateCondition(
-			fsc.Status.Conditions,
-			ConditionTypeDiskValidated,
-			metav1.ConditionTrue,
-			ReasonDiskValidationSucceeded,
-			"Disk/s validation succeeded",
-			fsc.Generation,
-		)
-		if statusErr := r.Status().Update(ctx, fsc); statusErr != nil {
-			logger.Error(statusErr, "Failed to update status after Device validation success")
-			return ctrl.Result{}, statusErr
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	// Create LocalDisk/s
-	if !r.isConditionTrue(fsc, ConditionTypeLocalDiskCreated) {
-
-		// Check if we're already in progress
-		isInProgress := false
-		for _, condition := range fsc.Status.Conditions {
-			if condition.Type == ConditionTypeLocalDiskCreated &&
-				condition.Status == metav1.ConditionFalse &&
-				condition.Reason == ReasonLocalDiskCreationInProgress {
-				isInProgress = true
-				break
-			}
-		}
-
-		// if not in progress, create LocalDisk/s
-		if !isInProgress {
-			err := r.ensureLocalDisk(ctx, fsc)
-			if err != nil {
-				logger.Error(err, "Failed to ensure LocalDisk")
-				// Update LocalDiskCreated condition
-				fsc.Status.Conditions = utils.UpdateCondition(
-					fsc.Status.Conditions,
-					ConditionTypeLocalDiskCreated,
-					metav1.ConditionFalse,
-					ReasonLocalDiskCreationFailed,
-					err.Error(),
-					fsc.Generation,
-				)
-				// Update Ready condition
-				fsc.Status.Conditions = utils.UpdateCondition(
-					fsc.Status.Conditions,
-					ConditionTypeReady,
-					metav1.ConditionFalse,
-					ReasonProvisioningFailed,
-					"LocalDisk creation failed",
-					fsc.Generation,
-				)
-
-				if statusErr := r.Status().Update(ctx, fsc); statusErr != nil {
-					logger.Error(statusErr, "Failed to update status after LocalDisk failure")
-					return ctrl.Result{}, statusErr
-				}
-				return ctrl.Result{RequeueAfter: time.Minute}, nil
-			}
-
-			// Set InProgress condition after successful creation
-			fsc.Status.Conditions = utils.UpdateCondition(
-				fsc.Status.Conditions,
-				ConditionTypeLocalDiskCreated,
-				metav1.ConditionFalse,
-				ReasonLocalDiskCreationInProgress,
-				"LocalDisks created, waiting for them to become ready",
-				fsc.Generation,
-			)
-			if statusErr := r.Status().Update(ctx, fsc); statusErr != nil {
-				return ctrl.Result{}, statusErr
-			}
-		}
-
-		return ctrl.Result{}, nil //  Don't requeue, wait for watch event to sync status
-	}
-
-		// Step 4: Create FileSystem
-	if !r.isConditionTrue(fsc, ConditionTypeFileSystemCreated) {
-		fileSystemReady, err := r.ensureFileSystem(ctx, fsc)
-		if err != nil {
-			logger.Error(err, "Failed to ensure FileSystem")
-			fsc.Status.Conditions = utils.UpdateCondition(fsc.Status.Conditions, ConditionTypeFileSystemCreated, metav1.ConditionFalse, ReasonProvisioningFailed, err.Error(), fsc.Generation)
-			fsc.Status.Conditions = utils.UpdateCondition(fsc.Status.Conditions, ConditionTypeReady, metav1.ConditionFalse, ReasonProvisioningFailed, "FileSystem creation failed", fsc.Generation)
-			if statusErr := r.Status().Update(ctx, fsc); statusErr != nil {
-				logger.Error(statusErr, "Failed to update status after FileSystem failure")
-			}
-			return ctrl.Result{RequeueAfter: time.Minute}, nil
-		}
-
-		if !fileSystemReady {
-			logger.Info("FileSystem not ready yet, waiting...")
-			fsc.Status.Conditions = utils.UpdateCondition(fsc.Status.Conditions, ConditionTypeFileSystemCreated, metav1.ConditionFalse, "Creating", "FileSystem is being created", fsc.Generation)
-			if statusErr := r.Status().Update(ctx, fsc); statusErr != nil {
-				logger.Error(statusErr, "Failed to update status")
-			}
-			return ctrl.Result{RequeueAfter: time.Second * 30}, nil
-		}
-
-		fsc.Status.Conditions = utils.UpdateCondition(fsc.Status.Conditions, ConditionTypeFileSystemCreated, metav1.ConditionTrue, ReasonFileSystemCreationSucceeded, "FileSystem created successfully", fsc.Generation)
-
-	}
-
-	// Step 5: Create StorageClass
-	if !r.isConditionTrue(fsc, ConditionTypeStorageClassCreated) {
-		storageClassReady, err := r.ensureStorageClass(ctx, fsc)
-		if err != nil {
-			logger.Error(err, "Failed to ensure StorageClass")
-			fsc.Status.Conditions = utils.UpdateCondition(fsc.Status.Conditions, ConditionTypeStorageClassCreated, metav1.ConditionFalse, ReasonProvisioningFailed, err.Error(), fsc.Generation)
-			fsc.Status.Conditions = utils.UpdateCondition(fsc.Status.Conditions, ConditionTypeReady, metav1.ConditionFalse, ReasonProvisioningFailed, "StorageClass creation failed", fsc.Generation)
-			if statusErr := r.Status().Update(ctx, fsc); statusErr != nil {
-				logger.Error(statusErr, "Failed to update status after StorageClass failure")
-			}
-			return ctrl.Result{RequeueAfter: time.Minute}, nil
-		}
-
-		if !storageClassReady {
-			logger.Info("StorageClass not ready yet, waiting...")
-			fsc.Status.Conditions = utils.UpdateCondition(fsc.Status.Conditions, ConditionTypeStorageClassCreated, metav1.ConditionFalse, "Creating", "StorageClass is being created", fsc.Generation)
-			if statusErr := r.Status().Update(ctx, fsc); statusErr != nil {
-				logger.Error(statusErr, "Failed to update status")
-			}
-			return ctrl.Result{RequeueAfter: time.Second * 30}, nil
-		}
-
-		fsc.Status.Conditions = utils.UpdateCondition(fsc.Status.Conditions, ConditionTypeStorageClassCreated, metav1.ConditionTrue, ReasonStorageClassCreationSucceeded, "StorageClass created successfully", fsc.Generation)
-	}
-
-	// All done - mark as Ready
-	if !r.isConditionTrue(fsc, ConditionTypeReady) {
-		fsc.Status.Conditions = utils.UpdateCondition(fsc.Status.Conditions, ConditionTypeReady, metav1.ConditionTrue, ReasonProvisioningSucceeded, "All resources created successfully", fsc.Generation)
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	err := r.Status().Update(ctx, fsc)
-	if err != nil {
-		logger.Error(err, "Failed to update final status")
+	// Finalizers first
+	if changed, err := r.handleFinalizers(ctx, fsc); err != nil {
 		return ctrl.Result{}, err
+	} else if changed {
+		// We wrote something (finalizer add/remove). Requeue to read fresh.
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Handle deletion
+	if changed, err := r.handleDeletion(ctx, fsc); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// 1) Ensure LocalDisks exist (create/update if needed)
+	if changed, err := r.ensureLocalDisks(ctx, fsc); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		// We created/updated children; let cache/watches settle.
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// 2) Sync FSC conditions from owned LocalDisks
+	if changed, err := r.syncLocalDiskConditions(ctx, fsc); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		// We updated FSC status; that’s a write -> requeue once.
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// 3) Ensure Filesystems (only if LD preconditions are satisfied)
+	if changed, err := r.ensureFileSystem(ctx, fsc); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// 4) Sync FSC conditions from owned Filesystems
+	if changed, err := r.syncFilesystemConditions(ctx, fsc); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// 5) Ensure StorageClass (only after Filesystem ready)
+	if changed, err := r.ensureStorageClass(ctx, fsc); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// 6) Aggregate/Ready
+	if changed, err := r.syncFSCReady(ctx, fsc); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	logger.Info("FileSystemClaim reconciliation completed successfully")
 	return ctrl.Result{}, nil
-	
+
 }
 
-// handleStatusUpdateRequest handles status update events from watched resources
-func (r *FileSystemClaimReconciler) handleStatusUpdateRequest(ctx context.Context, resource client.Object, kind string) (ctrl.Result, error) {
+// Handlers for FileSystemClaim reconciliation -- START
+
+// handleFinalizers handles the finalizers for the FileSystemClaim
+func (r *FileSystemClaimReconciler) handleFinalizers(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Handling status update", "name", resource.GetName())
 
-	resourceObj := &unstructured.Unstructured{}
+	if !controllerutil.ContainsFinalizer(fsc, FileSystemClaimFinalizer) {
+		if err := r.patchFSC(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+			controllerutil.AddFinalizer(cur, FileSystemClaimFinalizer)
+		}); err != nil {
+			logger.Error(err, "Failed to add finalizer")
+			return false, err
+		}
+		logger.Info("Added finalizer", "name", fsc.Name)
+		return true, nil
+	}
+	return false, nil
+}
 
-	switch kind {
-	case "LocalDisk":
-		resourceObj.SetGroupVersionKind(schema.GroupVersionKind{
+// TODO handleDeletion handles the deletion of FileSystemClaim and cleans up resources
+func (r *FileSystemClaimReconciler) handleDeletion(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	if fsc.DeletionTimestamp == nil {
+		return false, nil
+	}
+
+	if controllerutil.ContainsFinalizer(fsc, FileSystemClaimFinalizer) {
+		logger.Info("Cleanup logic placeholder - would delete LocalDisk, FileSystem, and StorageClass")
+
+		if err := r.patchFSC(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+			controllerutil.RemoveFinalizer(cur, FileSystemClaimFinalizer)
+		}); err != nil {
+			logger.Error(err, "Failed to remove finalizer")
+			return false, err
+		}
+		logger.Info("Removed finalizer", "name", fsc.Name)
+		return true, nil
+	}
+	return false, nil
+}
+
+// ensureLocalDisk creates LocalDisk/s
+func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	// Phase 1: validate once
+	if !r.isConditionTrue(fsc, ConditionTypeDiskValidated) {
+		if err := r.validateDisks(ctx, fsc); err != nil {
+			logger.Error(err, "Disk validation failed")
+			if e := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+				cur.Status.Conditions = utils.UpdateCondition(
+					cur.Status.Conditions,
+					ConditionTypeReady,
+					metav1.ConditionFalse,
+					ReasonValidationFailed,
+					err.Error(),
+					cur.Generation,
+				)
+				cur.Status.Conditions = utils.UpdateCondition(
+					cur.Status.Conditions,
+					ConditionTypeDiskValidated,
+					metav1.ConditionFalse,
+					ReasonDiskValidationFailed,
+					err.Error(),
+					cur.Generation,
+				)
+			}); e != nil {
+				logger.Error(e, "Failed to update status after disk validation failure")
+				return false, e
+			}
+			return true, nil
+		}
+
+		if e := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+			cur.Status.Conditions = utils.UpdateCondition(
+				cur.Status.Conditions,
+				ConditionTypeDiskValidated,
+				metav1.ConditionTrue,
+				ReasonDiskValidationSucceeded,
+				"Disk/s validation succeeded",
+				cur.Generation,
+			)
+		}); e != nil {
+			logger.Error(e, "Failed to update status after disk validation success")
+			return false, e
+		}
+		return true, nil
+	}
+
+	// Phase 2: ensure LocalDisks
+	for index, devicePath := range fsc.Spec.Disks {
+		localDiskName := fmt.Sprintf("%s-ld-%d", fsc.Name, index)
+
+		ld := &unstructured.Unstructured{}
+		ld.SetGroupVersionKind(schema.GroupVersionKind{
 			Group:   LocalDiskGroup,
 			Version: LocalDiskVersion,
 			Kind:    LocalDiskKind,
 		})
-	case "Filesystem":
-		resourceObj.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   FileSystemGroup,
-			Version: FileSystemVersion,
-			Kind:    FileSystemKind,
-		})
-	}
 
-	err := r.Get(ctx, types.NamespacedName{
-		Name:      resource.GetName(),
-		Namespace: resource.GetNamespace(),
-	}, resourceObj)
-	if err != nil {
-		logger.Error(err, "Failed to get resource")
-		return ctrl.Result{}, err
-	}
+		err := r.Get(ctx, types.NamespacedName{
+			Namespace: fsc.Namespace,
+			Name:      localDiskName,
+		}, ld)
 
-	// Check if resource is local disk or file system
-	if resourceObj.GetKind() == LocalDiskKind {
-		return r.handleLocalDiskStatusUpdateRequest(ctx, resourceObj)
-	} else if resourceObj.GetKind() == FileSystemKind {
-		return r.handleFileSystemStatusUpdateRequest(ctx, resourceObj)
-	}
+		switch {
+		case errors.IsNotFound(err):
+			nodeName, selErr := r.getRandomStorageNode(ctx)
+			if selErr != nil {
+				logger.Error(selErr, "failed to pick a storage node", "disk", devicePath)
+				if e := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+					cur.Status.Conditions = utils.UpdateCondition(
+						cur.Status.Conditions,
+						ConditionTypeLocalDiskCreated,
+						metav1.ConditionFalse,
+						ReasonLocalDiskCreationFailed,
+						fmt.Sprintf("failed to pick node for %s: %v", devicePath, selErr),
+						cur.Generation,
+					)
+					cur.Status.Conditions = utils.UpdateCondition(
+						cur.Status.Conditions,
+						ConditionTypeReady,
+						metav1.ConditionFalse,
+						ReasonProvisioningFailed,
+						"LocalDisk creation failed",
+						cur.Generation,
+					)
+				}); e != nil {
+					return false, e
+				}
+				return true, nil
+			}
 
-	return ctrl.Result{}, nil
+			ld.SetNamespace(fsc.Namespace)
+			ld.SetName(localDiskName)
+			if err := controllerutil.SetOwnerReference(fsc, ld, r.Scheme); err != nil {
+				return false, fmt.Errorf("set ownerRef: %w", err)
+			}
+			if ld.Object == nil {
+				ld.Object = map[string]interface{}{}
+			}
+			ld.Object["spec"] = map[string]interface{}{"device": devicePath, "node": nodeName}
+
+			logger.Info("Creating LocalDisk", "name", localDiskName, "device", devicePath, "node", nodeName)
+			if err := r.Create(ctx, ld); err != nil {
+				logger.Error(err, "failed to create LocalDisk", "name", localDiskName)
+				if e := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+					cur.Status.Conditions = utils.UpdateCondition(
+						cur.Status.Conditions,
+						ConditionTypeLocalDiskCreated,
+						metav1.ConditionFalse,
+						ReasonLocalDiskCreationFailed,
+						err.Error(),
+						cur.Generation,
+					)
+					cur.Status.Conditions = utils.UpdateCondition(
+						cur.Status.Conditions,
+						ConditionTypeReady,
+						metav1.ConditionFalse,
+						ReasonProvisioningFailed,
+						"LocalDisk creation failed",
+						cur.Generation,
+					)
+				}); e != nil {
+					return false, e
+				}
+				return true, nil
+			}
+
+			if e := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+				cur.Status.Conditions = utils.UpdateCondition(
+					cur.Status.Conditions,
+					ConditionTypeLocalDiskCreated,
+					metav1.ConditionFalse,
+					ReasonLocalDiskCreationInProgress,
+					"LocalDisks created, waiting for them to become ready",
+					cur.Generation,
+				)
+			}); e != nil {
+				return false, e
+			}
+			return true, nil
+
+		case err != nil:
+			return false, fmt.Errorf("Failed to get LocalDisk %s: %w", localDiskName, err)
+
+		default:
+			orig := ld.DeepCopy()
+			device := getNestedString(ld.Object, "spec", "device")
+			node := getNestedString(ld.Object, "spec", "node")
+
+			needsUpdate := device != devicePath
+			if needsUpdate {
+				if ld.Object == nil {
+					ld.Object = map[string]interface{}{}
+				}
+				ld.Object["spec"] = map[string]interface{}{
+					"device": devicePath,
+					"node":   node,
+				}
+				if err := r.Patch(ctx, ld, client.MergeFrom(orig)); err != nil {
+					return false, fmt.Errorf("patch LocalDisk %s: %w", localDiskName, err)
+				}
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
-// handleLocalDiskStatusUpdateRequest handles status update events from localdisks
-func (r *FileSystemClaimReconciler) handleLocalDiskStatusUpdateRequest(ctx context.Context, localDiskObj *unstructured.Unstructured) (ctrl.Result, error) {
+// syncLocalDiskConditions inspects all LocalDisks owned by this FSC and updates
+// ConditionTypeLocalDiskCreated with a precise reason/message. Returns changed=true if we wrote status.
+func (r *FileSystemClaimReconciler) syncLocalDiskConditions(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Handling local disk status update", "name", localDiskObj.GetName())
 
-	// Step 1: Find the owning FileSystemClaim
-	fsc, err := r.findFileSystemClaimOwner(ctx, localDiskObj)
-	if err != nil {
-		logger.Error(err, "Failed to find FileSystemClaim owner")
-		return ctrl.Result{}, err
-	}
-	if fsc == nil {
-		logger.Info("No FileSystemClaim owner found for LocalDisk", "name", localDiskObj.GetName())
-		return ctrl.Result{}, nil
-	}
-
-	logger.Info("Found owning FileSystemClaim", "fsc", fsc.Name, "namespace", fsc.Namespace)
-
-	// Step 2: List all LocalDisks owned by this FSC
-	localDiskList := &unstructured.UnstructuredList{}
-	localDiskList.SetGroupVersionKind(schema.GroupVersionKind{
+	// 1) List owned LocalDisks
+	ldList := &unstructured.UnstructuredList{}
+	ldList.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   LocalDiskGroup,
 		Version: LocalDiskVersion,
 		Kind:    LocalDiskList,
 	})
-
-	// List LocalDisks in the same namespace which should be ibm-spectrum-scale
-	err = r.List(ctx, localDiskList, client.InNamespace(fsc.Namespace))
-	if err != nil {
-		logger.Error(err, "Failed to list LocalDisks")
-		return ctrl.Result{}, err
+	if err := r.List(ctx, ldList, client.InNamespace(fsc.Namespace)); err != nil {
+		return false, fmt.Errorf("list LocalDisks: %w", err)
+	}
+	var owned []unstructured.Unstructured
+	for _, it := range ldList.Items {
+		if isOwnedByThisFSC(&it, fsc.Name) {
+			owned = append(owned, it)
+		}
 	}
 
-	// Filter LocalDisks owned by this FSC
-	var ownedLocalDisks []unstructured.Unstructured
-	for _, ld := range localDiskList.Items {
-		if isOwnedByFileSystemClaim(&ld) {
-			ownerRefs := ld.GetOwnerReferences()
-			for _, ownerRef := range ownerRefs {
-				if ownerRef.Kind == "FileSystemClaim" &&
-					ownerRef.Name == fsc.Name &&
-					ownerRef.Controller != nil && *ownerRef.Controller {
-					ownedLocalDisks = append(ownedLocalDisks, ld)
-					break
-				}
+	// 2) If none yet but validated, mark in-progress (idempotent)
+	if len(owned) == 0 {
+		if r.isConditionTrue(fsc, ConditionTypeDiskValidated) {
+			desiredStatus := metav1.ConditionFalse
+			desiredReason := ReasonLocalDiskCreationInProgress
+			desiredMsg := "Waiting for LocalDisk objects to appear"
+
+			prev := apimeta.FindStatusCondition(fsc.Status.Conditions, ConditionTypeLocalDiskCreated)
+			if prev != nil && prev.Status == desiredStatus && prev.Reason == desiredReason && prev.Message == desiredMsg {
+				logger.Info("LocalDiskCreated unchanged (no LDs yet); skipping patch")
+				return false, nil
+			}
+			if err := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+				cur.Status.Conditions = utils.UpdateCondition(
+					cur.Status.Conditions,
+					ConditionTypeLocalDiskCreated,
+					desiredStatus, desiredReason, desiredMsg,
+					cur.Generation,
+				)
+			}); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		return false, nil
+	}
+
+	// 3) Collect names of Filesystems owned by this FSC (used to validate Used=True cases)
+	fsList := &unstructured.UnstructuredList{}
+	fsList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   FileSystemGroup,
+		Version: FileSystemVersion,
+		Kind:    FileSystemList,
+	})
+	ownedFS := map[string]struct{}{}
+	if err := r.List(ctx, fsList, client.InNamespace(fsc.Namespace)); err == nil {
+		for _, it := range fsList.Items {
+			if isOwnedByThisFSC(&it, fsc.Name) {
+				ownedFS[it.GetName()] = struct{}{}
 			}
 		}
 	}
+	// include the deterministic name even if informer lagged
+	ownedFS[fmt.Sprintf("%s-fs", fsc.Name)] = struct{}{}
 
-	if len(ownedLocalDisks) == 0 {
-		logger.Info("No LocalDisks found owned by FileSystemClaim", "fsc", fsc.Name)
-		return ctrl.Result{}, nil
-	}
+	// 4) Inspect each LocalDisk
+	allGood := true
+	hardFailure := false
+	var failingName, failingMsg string
 
-	logger.Info("Found LocalDisks owned by FSC", "count", len(ownedLocalDisks), "fsc", fsc.Name)
-
-	// Step 3: Check each LocalDisk's status conditions
-	// Track if all LocalDisks are ready
-	allReady := true
-	var failureMessage string
-	var failedLocalDiskName string
-
-	for _, ld := range ownedLocalDisks {
-		ldName := ld.GetName()
-
-		// Extract status.conditions from the LocalDisk (standard metav1.Condition format)
-		conditions, found, err := unstructured.NestedSlice(ld.Object, "status", "conditions")
-		if err != nil || !found {
-			allReady = false
-			failedLocalDiskName = ldName
-			failureMessage = "Status conditions not found"
-			logger.Info("LocalDisk has no status conditions", "name", ldName)
+	for _, ld := range owned {
+		// conditions -> []metav1.Condition
+		sl, found, _ := unstructured.NestedSlice(ld.Object, "status", "conditions")
+		if !found {
+			allGood = false
+			failingName, failingMsg = ld.GetName(), "status.conditions missing"
 			break
 		}
+		conds := asMetaConditions(sl)
 
-		// Helper function to find a specific condition by type
-		findCondition := func(condType string) (string, string, bool) {
-			for _, cond := range conditions {
-				condition, ok := cond.(map[string]interface{})
-				if !ok {
-					continue
-				}
-
-				if ct, _, _ := unstructured.NestedString(condition, "type"); ct == condType {
-					status, _, _ := unstructured.NestedString(condition, "status")
-					message, _, _ := unstructured.NestedString(condition, "message")
-					return status, message, true
-				}
+		// Ready must be True
+		if !apimeta.IsStatusConditionTrue(conds, "Ready") {
+			allGood = false
+			if c := apimeta.FindStatusCondition(conds, "Ready"); c != nil {
+				failingMsg = c.Message
+			} else {
+				failingMsg = "Ready condition not found"
 			}
-			return "", "", false
-		}
-
-		// Priority 1: Check Ready condition (most critical)
-		readyStatus, readyMessage, readyFound := findCondition("Ready")
-		if !readyFound {
-			allReady = false
-			failedLocalDiskName = ldName
-			failureMessage = "Ready condition not found"
-			logger.Info("LocalDisk missing Ready condition", "name", ldName)
-			break
-		}
-		if readyStatus != "True" {
-			allReady = false
-			failedLocalDiskName = ldName
-			failureMessage = readyMessage
-			logger.Info("LocalDisk is not ready", "name", ldName, "message", failureMessage)
+			failingName = ld.GetName()
 			break
 		}
 
-		// Priority 2: Check Used condition (must be False)
-		usedStatus, usedMessage, usedFound := findCondition("Used")
-		if !usedFound {
-			allReady = false
-			failedLocalDiskName = ldName
-			failureMessage = "Used condition not found"
-			logger.Info("LocalDisk missing Used condition", "name", ldName)
+		// Used logic:
+		// - Used=False  -> OK (pre-FS stage)
+		// - Used=True   -> OK only if status.filesystem belongs to this FSC
+		cUsed := apimeta.FindStatusCondition(conds, "Used")
+		if cUsed == nil {
+			allGood = false
+			failingName, failingMsg = ld.GetName(), "Used condition not found"
 			break
 		}
-		if usedStatus == "True" {
-			allReady = false
-			failedLocalDiskName = ldName
-			failureMessage = usedMessage
-			logger.Info("LocalDisk is already in use", "name", ldName, "message", failureMessage)
-			break
-		}
-
-		// Priority 3: Check Available condition
-		availableStatus, availableMessage, availableFound := findCondition("Available")
-		if !availableFound {
-			allReady = false
-			failedLocalDiskName = ldName
-			failureMessage = "Available condition not found"
-			logger.Info("LocalDisk missing Available condition", "name", ldName)
-			break
-		}
-		if availableStatus != "True" {
-			allReady = false
-			failedLocalDiskName = ldName
-			failureMessage = availableMessage
-			logger.Info("LocalDisk is not available", "name", ldName, "message", failureMessage)
-			break
+		if cUsed.Status == metav1.ConditionTrue {
+			// read status.filesystem (string)
+			fsName, _, _ := unstructured.NestedString(ld.Object, "status", "filesystem")
+			if _, ok := ownedFS[fsName]; !ok || fsName == "" {
+				allGood = false
+				hardFailure = true
+				if fsName == "" {
+					failingMsg = "LocalDisk is used but status.filesystem is empty or missing"
+				} else {
+					failingMsg = fmt.Sprintf("LocalDisk is used by different filesystem %q", fsName)
+				}
+				failingName = ld.GetName()
+				break
+			}
+			// Used by our FS → OK
 		}
 
-		logger.Info("LocalDisk is ready and available", "name", ldName)
+		// NOTE: We intentionally do NOT gate on Available; it may be True or False.
+		// (Previously this caused false positives after the FS claimed the disk.)
 	}
 
-	// Step 4: Update FSC status based on results
-	if allReady {
-		logger.Info("All LocalDisks are ready and available", "fsc", fsc.Name, "count", len(ownedLocalDisks))
-		fsc.Status.Conditions = utils.UpdateCondition(
-			fsc.Status.Conditions,
-			ConditionTypeLocalDiskCreated,
-			metav1.ConditionTrue,
-			ReasonLocalDiskCreationSucceeded,
-			fmt.Sprintf("All %d LocalDisks are ready and available", len(ownedLocalDisks)),
-			fsc.Generation,
-		)
+	// 5) Desired FSC condition
+	var desiredStatus metav1.ConditionStatus
+	var desiredReason, desiredMsg string
+
+	if allGood {
+		desiredStatus = metav1.ConditionTrue
+		desiredReason = ReasonLocalDiskCreationSucceeded
+		desiredMsg = fmt.Sprintf("All %d LocalDisks are Ready; if used, they are used by this Filesystem.", len(owned))
 	} else {
-		logger.Info("LocalDisk not ready", "fsc", fsc.Name, "failedDisk", failedLocalDiskName)
-		fsc.Status.Conditions = utils.UpdateCondition(
-			fsc.Status.Conditions,
-			ConditionTypeLocalDiskCreated,
-			metav1.ConditionFalse,
-			ReasonLocalDiskCreationFailed,
-			fmt.Sprintf("LocalDisk %s: %s", failedLocalDiskName, failureMessage),
-			fsc.Generation,
-		)
-	}
-
-	// Step 5: Persist status update
-	err = r.Status().Update(ctx, fsc)
-	if err != nil {
-		logger.Error(err, "Failed to update FileSystemClaim status")
-		return ctrl.Result{}, err
-	}
-
-	logger.Info("Successfully updated FileSystemClaim status", "fsc", fsc.Name)
-
-	// Requeue to trigger main reconciliation loop
-	return ctrl.Result{Requeue: true}, nil
-}
-
-// handleFileSystemStatusUpdateRequest handles status update events from filesystem
-func (r *FileSystemClaimReconciler) handleFileSystemStatusUpdateRequest(ctx context.Context, resourceObj *unstructured.Unstructured) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	logger.Info("Handling file system status update", "name", resourceObj.GetName())
-	return ctrl.Result{}, nil
-}
-
-// findFileSystemClaimOwner finds the FileSystemClaim that owns the given resource
-func (r *FileSystemClaimReconciler) findFileSystemClaimOwner(ctx context.Context, resource client.Object) (*fusionv1alpha1.FileSystemClaim, error) {
-	ownerRefs := resource.GetOwnerReferences()
-	for _, ownerRef := range ownerRefs {
-		if ownerRef.Kind == "FileSystemClaim" &&
-			ownerRef.APIVersion == "fusion.storage.openshift.io/v1alpha1" &&
-			ownerRef.Controller != nil && *ownerRef.Controller {
-
-			// Get the FileSystemClaim
-			fsc := &fusionv1alpha1.FileSystemClaim{}
-			err := r.Get(ctx, types.NamespacedName{
-				Name:      ownerRef.Name,
-				Namespace: resource.GetNamespace(), // Use resource namespace for LocalDisk/FileSystem, empty for StorageClass
-			}, fsc)
-			if err != nil {
-				return nil, err
-			}
-			return fsc, nil
-		}
-	}
-	return nil, nil // No owner found
-}
-
-// ensureLocalDisk creates LocalDisk/s
-func (r *FileSystemClaimReconciler) ensureLocalDisk(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) error {
-	logger := log.FromContext(ctx)
-
-	for index, devicePath := range fsc.Spec.Disks {
-		localDiskName := fmt.Sprintf("%s-ld-%d", fsc.Name, index)
-
-		// Create LocalDisk object
-		localDiskObj := &unstructured.Unstructured{}
-		localDiskObj.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   LocalDiskGroup,
-			Version: LocalDiskVersion,
-			Kind:    LocalDiskKind,
-		})
-
-		// Check if LocalDisk already exists
-		err := r.Get(ctx, types.NamespacedName{
-			Name:      localDiskName,
-			Namespace: fsc.Namespace,
-		}, localDiskObj)
-
-		if err != nil && errors.IsNotFound(err) {
-			// Get a random storage node for this disk
-			nodeName, err := r.getRandomStorageNode(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to get random sharedstorage node for disk %s: %w", devicePath, err)
-			}
-
-			// Create LocalDisk
-			logger.Info("Creating LocalDisk", "name", localDiskName, "device", devicePath, "node", nodeName)
-
-			localDiskObj.SetName(localDiskName)
-			localDiskObj.SetNamespace(fsc.Namespace)
-
-			// Set owner reference to LocalDisk
-			err = controllerutil.SetOwnerReference(fsc, localDiskObj, r.Scheme)
-			if err != nil {
-				return fmt.Errorf("failed to set owner reference: %w", err)
-			}
-
-			// Set LocalDisk spec
-			spec := map[string]interface{}{
-				"device": devicePath,
-				"node":   nodeName,
-			}
-			localDiskObj.Object["spec"] = spec
-
-			err = r.Create(ctx, localDiskObj)
-			if err != nil {
-				return fmt.Errorf("failed to create LocalDisk: %w", err)
-			}
-
-			logger.Info("LocalDisk created successfully", "name", localDiskName)
-
-		} else if err != nil {
-			return fmt.Errorf("failed to get LocalDisk: %w", err)
+		desiredStatus = metav1.ConditionFalse
+		if hardFailure {
+			desiredReason = ReasonLocalDiskCreationFailed
 		} else {
-			// LocalDisk already exists
-			logger.Info("LocalDisk already exists", "name", localDiskName)
+			desiredReason = ReasonLocalDiskCreationInProgress
 		}
+		desiredMsg = fmt.Sprintf("LocalDisk %s: %s", failingName, failingMsg)
 	}
 
-	return nil
+	// 6) Idempotency guard
+	prev := apimeta.FindStatusCondition(fsc.Status.Conditions, ConditionTypeLocalDiskCreated)
+	if prev != nil && prev.Status == desiredStatus && prev.Reason == desiredReason && prev.Message == desiredMsg {
+		logger.Info("LocalDiskCreated condition unchanged; skipping patch")
+		return false, nil
+	}
+
+	if err := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+		cur.Status.Conditions = utils.UpdateCondition(
+			cur.Status.Conditions,
+			ConditionTypeLocalDiskCreated,
+			desiredStatus, desiredReason, desiredMsg,
+			cur.Generation,
+		)
+	}); err != nil {
+		return false, err
+	}
+
+	logger.Info("synced LocalDisk conditions", "fsc", fsc.Name, "owned", len(owned), "allGood", allGood)
+	return true, nil
 }
 
 // ensureFileSystem creates FileSystem if it doesn't exist and returns its ready status
 func (r *FileSystemClaimReconciler) ensureFileSystem(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
-	return false, nil
+	logger := log.FromContext(ctx)
+	logger.Info("ensureFileSystem", "name", fsc.Name)
+
+	if !r.isConditionTrue(fsc, ConditionTypeLocalDiskCreated) {
+		return false, nil
+	}
+
+	ldList := &unstructured.UnstructuredList{}
+	ldList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   LocalDiskGroup,
+		Version: LocalDiskVersion,
+		Kind:    LocalDiskList,
+	})
+	if err := r.List(ctx, ldList, client.InNamespace(fsc.Namespace)); err != nil {
+		return false, fmt.Errorf("list LocalDisks: %w", err)
+	}
+
+	var ldNames []string
+	for _, it := range ldList.Items {
+		if isOwnedByThisFSC(&it, fsc.Name) {
+			ldNames = append(ldNames, it.GetName())
+		}
+	}
+	if len(ldNames) == 0 {
+		logger.Info("ensureFileSystem: no owned LocalDisks found despite LocalDiskCreated=True; skipping")
+		return false, nil
+	}
+
+	toIface := func(ss []string) []interface{} {
+		out := make([]interface{}, len(ss))
+		for i, s := range ss {
+			out[i] = s
+		}
+		return out
+	}
+	desiredSpec := map[string]interface{}{
+		"local": map[string]interface{}{
+			"blockSize": "4M",
+			"pools": []interface{}{
+				map[string]interface{}{
+					"name":  "system",
+					"disks": toIface(ldNames),
+				},
+			},
+			"replication": "1-way",
+			"type":        "shared",
+		},
+		"seLinuxOptions": map[string]interface{}{
+			"level": "s0",
+			"role":  "object_r",
+			"type":  "container_file_t",
+			"user":  "system_u",
+		},
+	}
+
+	fsList := &unstructured.UnstructuredList{}
+	fsList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   FileSystemGroup,
+		Version: FileSystemVersion,
+		Kind:    "FilesystemList",
+	})
+	if err := r.List(ctx, fsList, client.InNamespace(fsc.Namespace)); err != nil {
+		return false, fmt.Errorf("list Filesystems: %w", err)
+	}
+
+	var owned []*unstructured.Unstructured
+	for i := range fsList.Items {
+		if isOwnedByThisFSC(&fsList.Items[i], fsc.Name) {
+			obj := fsList.Items[i]
+			owned = append(owned, &obj)
+		}
+	}
+
+	switch len(owned) {
+	case 0:
+		fsName := fmt.Sprintf("%s-fs", fsc.Name)
+
+		fs := &unstructured.Unstructured{}
+		fs.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   FileSystemGroup,
+			Version: FileSystemVersion,
+			Kind:    FileSystemKind,
+		})
+		fs.SetNamespace(fsc.Namespace)
+		fs.SetName(fsName)
+
+		if err := controllerutil.SetOwnerReference(fsc, fs, r.Scheme); err != nil {
+			return false, fmt.Errorf("set ownerRef: %w", err)
+		}
+		if fs.Object == nil {
+			fs.Object = map[string]interface{}{}
+		}
+		fs.Object["spec"] = desiredSpec
+
+		logger.Info("Creating Filesystem", "name", fsName, "disks", ldNames)
+		if err := r.Create(ctx, fs); err != nil {
+			if e := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+				cur.Status.Conditions = utils.UpdateCondition(
+					cur.Status.Conditions,
+					ConditionTypeFileSystemCreated,
+					metav1.ConditionFalse,
+					ReasonFileSystemCreationFailed,
+					err.Error(),
+					cur.Generation,
+				)
+			}); e != nil {
+				return false, e
+			}
+			return true, nil
+		}
+
+		if e := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+			cur.Status.Conditions = utils.UpdateCondition(
+				cur.Status.Conditions,
+				ConditionTypeFileSystemCreated,
+				metav1.ConditionFalse,
+				ReasonFileSystemCreationInProgress,
+				"Filesystem created; waiting to become Ready",
+				cur.Generation,
+			)
+		}); e != nil {
+			return false, e
+		}
+		return true, nil
+
+	case 1:
+		fs := owned[0]
+		orig := fs.DeepCopy()
+
+		equalStringSet := func(a, b []interface{}) bool {
+			if len(a) != len(b) {
+				return false
+			}
+			m := map[string]int{}
+			for _, v := range a {
+				m[fmt.Sprint(v)]++
+			}
+			for _, v := range b {
+				k := fmt.Sprint(v)
+				if m[k] == 0 {
+					return false
+				}
+				m[k]--
+			}
+			for _, n := range m {
+				if n != 0 {
+					return false
+				}
+			}
+			return true
+		}
+
+		curBlock, _, _ := unstructured.NestedString(fs.Object, "spec", "local", "blockSize")
+		curRep, _, _ := unstructured.NestedString(fs.Object, "spec", "local", "replication")
+		curType, _, _ := unstructured.NestedString(fs.Object, "spec", "local", "type")
+		curPools, _, _ := unstructured.NestedSlice(fs.Object, "spec", "local", "pools")
+		var curDisks []interface{}
+		var curPoolName string
+		if len(curPools) > 0 {
+			if pm, ok := curPools[0].(map[string]interface{}); ok {
+				curDisks, _, _ = unstructured.NestedSlice(pm, "disks")
+				curPoolName, _, _ = unstructured.NestedString(pm, "name")
+			}
+		}
+		curSELvl, _, _ := unstructured.NestedString(fs.Object, "spec", "seLinuxOptions", "level")
+		curSERole, _, _ := unstructured.NestedString(fs.Object, "spec", "seLinuxOptions", "role")
+		curSEType, _, _ := unstructured.NestedString(fs.Object, "spec", "seLinuxOptions", "type")
+		curSEUser, _, _ := unstructured.NestedString(fs.Object, "spec", "seLinuxOptions", "user")
+
+		wantBlock := "4M"
+		wantRep := "1-way"
+		wantType := "shared"
+		wantPoolName := "system"
+		wantDisks := toIface(ldNames)
+		wantSELvl, wantSERole, wantSEType, wantSEUser := "s0", "object_r", "container_file_t", "system_u"
+
+		changed := false
+		if curBlock != wantBlock {
+			_ = unstructured.SetNestedField(fs.Object, wantBlock, "spec", "local", "blockSize")
+			changed = true
+		}
+		if curRep != wantRep {
+			_ = unstructured.SetNestedField(fs.Object, wantRep, "spec", "local", "replication")
+			changed = true
+		}
+		if curType != wantType {
+			_ = unstructured.SetNestedField(fs.Object, wantType, "spec", "local", "type")
+			changed = true
+		}
+		if curPoolName != wantPoolName {
+			pool0 := map[string]interface{}{"name": wantPoolName, "disks": wantDisks}
+			_ = unstructured.SetNestedSlice(fs.Object, []interface{}{pool0}, "spec", "local", "pools")
+			changed = true
+		} else if !equalStringSet(curDisks, wantDisks) {
+			if len(curPools) == 0 {
+				curPools = []interface{}{map[string]interface{}{}}
+			}
+			pm, _ := curPools[0].(map[string]interface{})
+			pm["name"], pm["disks"] = wantPoolName, wantDisks
+			curPools[0] = pm
+			_ = unstructured.SetNestedSlice(fs.Object, curPools, "spec", "local", "pools")
+			changed = true
+		}
+		if curSELvl != wantSELvl {
+			_ = unstructured.SetNestedField(fs.Object, wantSELvl, "spec", "seLinuxOptions", "level")
+			changed = true
+		}
+		if curSERole != wantSERole {
+			_ = unstructured.SetNestedField(fs.Object, wantSERole, "spec", "seLinuxOptions", "role")
+			changed = true
+		}
+		if curSEType != wantSEType {
+			_ = unstructured.SetNestedField(fs.Object, wantSEType, "spec", "seLinuxOptions", "type")
+			changed = true
+		}
+		if curSEUser != wantSEUser {
+			_ = unstructured.SetNestedField(fs.Object, wantSEUser, "spec", "seLinuxOptions", "user")
+			changed = true
+		}
+
+		if changed {
+			if err := r.Patch(ctx, fs, client.MergeFrom(orig)); err != nil {
+				return false, fmt.Errorf("patch Filesystem: %w", err)
+			}
+			return true, nil
+		}
+		return false, nil
+
+	default:
+		msg := fmt.Sprintf("found %d Filesystems owned by FSC; expected 1", len(owned))
+		if e := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+			cur.Status.Conditions = utils.UpdateCondition(
+				cur.Status.Conditions,
+				ConditionTypeFileSystemCreated,
+				metav1.ConditionFalse,
+				ReasonFileSystemCreationFailed,
+				msg,
+				cur.Generation,
+			)
+		}); e != nil {
+			return false, e
+		}
+		return true, nil
+	}
 }
 
-// ensureStorageClass creates StorageClass if it doesn't exist and returns its ready status
+// syncFilesystemConditions updates ConditionTypeFileSystemCreated by inspecting owned Filesystem objects.
+// Keep this conservative: "InProgress" unless we can positively assert success or failure.
+func (r *FileSystemClaimReconciler) syncFilesystemConditions(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	fsList := &unstructured.UnstructuredList{}
+	fsList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   FileSystemGroup,
+		Version: FileSystemVersion,
+		Kind:    FileSystemList,
+	})
+	if err := r.List(ctx, fsList, client.InNamespace(fsc.Namespace)); err != nil {
+		return false, fmt.Errorf("list Filesystems: %w", err)
+	}
+
+	var owned []unstructured.Unstructured
+	for _, it := range fsList.Items {
+		if isOwnedByThisFSC(&it, fsc.Name) {
+			owned = append(owned, it)
+		}
+	}
+
+	var desiredStatus metav1.ConditionStatus
+	var desiredReason, desiredMsg string
+
+	if len(owned) == 0 {
+		desiredStatus = metav1.ConditionFalse
+		desiredReason = ReasonFileSystemCreationInProgress
+		desiredMsg = "Waiting for Filesystem to be created"
+	} else {
+		allGood := true
+		var failingName, failingMsg string
+
+		for _, fs := range owned {
+			sl, found, _ := unstructured.NestedSlice(fs.Object, "status", "conditions")
+			if !found {
+				allGood = false
+				failingName, failingMsg = fs.GetName(), "status.conditions missing"
+				break
+			}
+			conds := asMetaConditions(sl)
+
+			if !apimeta.IsStatusConditionTrue(conds, "Success") {
+				allGood = false
+				if c := apimeta.FindStatusCondition(conds, "Success"); c != nil {
+					failingMsg = c.Message
+				} else {
+					failingMsg = "Success condition not found"
+				}
+				failingName = fs.GetName()
+				break
+			}
+			if !apimeta.IsStatusConditionTrue(conds, "Healthy") {
+				allGood = false
+				if c := apimeta.FindStatusCondition(conds, "Healthy"); c != nil {
+					failingMsg = c.Message
+				} else {
+					failingMsg = "Healthy condition not found"
+				}
+				failingName = fs.GetName()
+				break
+			}
+		}
+
+		if allGood {
+			desiredStatus = metav1.ConditionTrue
+			desiredReason = ReasonFileSystemCreationSucceeded
+			desiredMsg = "Filesystem is Success=True and Healthy=True"
+		} else {
+			desiredStatus = metav1.ConditionFalse
+			desiredReason = ReasonFileSystemCreationInProgress
+			desiredMsg = fmt.Sprintf("Filesystem %s not healthy: %s", failingName, failingMsg)
+		}
+	}
+
+	// Idempotency guard: only patch if changed
+	prev := apimeta.FindStatusCondition(fsc.Status.Conditions, ConditionTypeFileSystemCreated)
+	if prev != nil && prev.Status == desiredStatus && prev.Reason == desiredReason && prev.Message == desiredMsg {
+		logger.Info("FilesystemCreated condition unchanged; skipping patch")
+		return false, nil
+	}
+
+	if err := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+		cur.Status.Conditions = utils.UpdateCondition(
+			cur.Status.Conditions,
+			ConditionTypeFileSystemCreated,
+			desiredStatus,
+			desiredReason,
+			desiredMsg,
+			cur.Generation,
+		)
+	}); err != nil {
+		return false, err
+	}
+
+	logger.Info("synced Filesystem conditions", "fsc", fsc.Name, "owned", len(owned), "status", string(desiredStatus))
+	return true, nil
+}
+
+// // ensureStorageClass creates StorageClass if it doesn't exist and returns its ready status
 func (r *FileSystemClaimReconciler) ensureStorageClass(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
-	return false, nil
+	logger := log.FromContext(ctx)
+
+	// Gate on Filesystem being ready
+	if !r.isConditionTrue(fsc, ConditionTypeFileSystemCreated) {
+		return false, nil
+	}
+
+	scName := fmt.Sprintf("%s-sc", fsc.Name) // e.g., "new-sc"
+	fsName := fmt.Sprintf("%s-fs", fsc.Name) // the Filesystem name we created
+
+	allowExpand := true
+	reclaim := corev1.PersistentVolumeReclaimDelete
+	bindMode := storagev1.VolumeBindingImmediate
+
+	desired := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: scName,
+			Annotations: map[string]string{
+				"storageclass.kubevirt.io/is-default-virt-class": "true",
+			},
+			Labels: map[string]string{
+				"fusion.storage.openshift.io/owned-by-name":      fsc.Name,
+				"fusion.storage.openshift.io/owned-by-namespace": fsc.Namespace,
+			},
+		},
+		Provisioner:          "spectrumscale.csi.ibm.com",
+		AllowVolumeExpansion: &allowExpand,
+		ReclaimPolicy:        &reclaim,
+		VolumeBindingMode:    &bindMode,
+		Parameters: map[string]string{
+			"volBackendFs": fsName, // << template requires this key
+		},
+	}
+
+	current := &storagev1.StorageClass{}
+	err := r.Get(ctx, types.NamespacedName{Name: scName}, current)
+	switch {
+	case errors.IsNotFound(err):
+		logger.Info("Creating StorageClass", "name", scName, "filesystem", fsName)
+		if err := r.Create(ctx, desired); err != nil {
+			// mark SC create failed
+			if e := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+				cur.Status.Conditions = utils.UpdateCondition(
+					cur.Status.Conditions,
+					ConditionTypeStorageClassCreated,
+					metav1.ConditionFalse,
+					ReasonStorageClassCreationFailed,
+					err.Error(),
+					cur.Generation,
+				)
+			}); e != nil {
+				return false, e
+			}
+			return true, nil
+		}
+
+		// mark SC created (idempotent guard)
+		prev := apimeta.FindStatusCondition(fsc.Status.Conditions, ConditionTypeStorageClassCreated)
+		if prev == nil || prev.Status != metav1.ConditionTrue || prev.Reason != ReasonStorageClassCreationSucceeded {
+			if err := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+				cur.Status.Conditions = utils.UpdateCondition(
+					cur.Status.Conditions,
+					ConditionTypeStorageClassCreated,
+					metav1.ConditionTrue,
+					ReasonStorageClassCreationSucceeded,
+					"StorageClass created",
+					cur.Generation,
+				)
+			}); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		return false, nil
+
+	case err != nil:
+		return false, fmt.Errorf("get StorageClass %q: %w", scName, err)
+
+	default:
+		// Drift correction to match the template
+		orig := current.DeepCopy()
+		changed := false
+
+		if current.Annotations == nil {
+			current.Annotations = map[string]string{}
+		}
+		if current.Annotations["storageclass.kubevirt.io/is-default-virt-class"] != "true" {
+			current.Annotations["storageclass.kubevirt.io/is-default-virt-class"] = "true"
+			changed = true
+		}
+
+		if current.Labels == nil {
+			current.Labels = map[string]string{}
+		}
+		if current.Labels["fusion.storage.openshift.io/owned-by-name"] != fsc.Name {
+			current.Labels["fusion.storage.openshift.io/owned-by-name"] = fsc.Name
+			changed = true
+		}
+		if current.Labels["fusion.storage.openshift.io/owned-by-namespace"] != fsc.Namespace {
+			current.Labels["fusion.storage.openshift.io/owned-by-namespace"] = fsc.Namespace
+			changed = true
+		}
+
+		if current.Provisioner != desired.Provisioner {
+			current.Provisioner = desired.Provisioner
+			changed = true
+		}
+		if current.AllowVolumeExpansion == nil || *current.AllowVolumeExpansion != *desired.AllowVolumeExpansion {
+			current.AllowVolumeExpansion = desired.AllowVolumeExpansion
+			changed = true
+		}
+		if current.ReclaimPolicy == nil || *current.ReclaimPolicy != *desired.ReclaimPolicy {
+			current.ReclaimPolicy = desired.ReclaimPolicy
+			changed = true
+		}
+		if current.VolumeBindingMode == nil || *current.VolumeBindingMode != *desired.VolumeBindingMode {
+			current.VolumeBindingMode = desired.VolumeBindingMode
+			changed = true
+		}
+		if !reflect.DeepEqual(current.Parameters, desired.Parameters) {
+			current.Parameters = desired.Parameters
+			changed = true
+		}
+
+		if changed {
+			if err := r.Patch(ctx, current, client.MergeFrom(orig)); err != nil {
+				return false, fmt.Errorf("patch StorageClass %q: %w", scName, err)
+			}
+		}
+
+		// Ensure condition is True (idempotent)
+		prev := apimeta.FindStatusCondition(fsc.Status.Conditions, ConditionTypeStorageClassCreated)
+		if prev == nil || prev.Status != metav1.ConditionTrue || prev.Reason != ReasonStorageClassCreationSucceeded {
+			if err := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+				cur.Status.Conditions = utils.UpdateCondition(
+					cur.Status.Conditions,
+					ConditionTypeStorageClassCreated,
+					metav1.ConditionTrue,
+					ReasonStorageClassCreationSucceeded,
+					"StorageClass present",
+					cur.Generation,
+				)
+			}); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		return changed, nil
+	}
+}
+
+// syncFSCReady aggregates the overall Ready condition from the sub-conditions.
+func (r *FileSystemClaimReconciler) syncFSCReady(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
+	readyNow :=
+		r.isConditionTrue(fsc, ConditionTypeDiskValidated) &&
+			r.isConditionTrue(fsc, ConditionTypeLocalDiskCreated) &&
+			r.isConditionTrue(fsc, ConditionTypeFileSystemCreated) &&
+			r.isConditionTrue(fsc, ConditionTypeStorageClassCreated)
+
+	var desired metav1.ConditionStatus
+	var reason, msg string
+
+	if readyNow {
+		desired = metav1.ConditionTrue
+		reason = ReasonProvisioningSucceeded
+		msg = "All resources created and ready"
+	} else {
+		desired = metav1.ConditionFalse
+		reason = ReasonProvisioningInProgress
+		msg = "Provisioning in progress"
+	}
+
+	prev := metav1.ConditionStatus(metav1.ConditionUnknown)
+	for _, c := range fsc.Status.Conditions {
+		if c.Type == ConditionTypeReady {
+			prev = c.Status
+			break
+		}
+	}
+	if prev == desired {
+		return false, nil
+	}
+
+	if err := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+		cur.Status.Conditions = utils.UpdateCondition(
+			cur.Status.Conditions,
+			ConditionTypeReady,
+			desired,
+			reason,
+			msg,
+			cur.Generation,
+		)
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// Handlers for FileSystemClaim reconciliation -- END
+
+// Helper functions -- START
+
+// helper function to get a nested string from a map[string]interface{}
+func getNestedString(obj map[string]interface{}, fields ...string) string {
+	cur := obj
+	for i := 0; i < len(fields)-1; i++ {
+		m, _ := cur[fields[i]].(map[string]interface{})
+		cur = m
+		if cur == nil {
+			return ""
+		}
+	}
+	if v, ok := cur[fields[len(fields)-1]].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// convert unstructured.Slice to metav1.Condition
+func asMetaConditions(sl []interface{}) []metav1.Condition {
+	out := make([]metav1.Condition, 0, len(sl))
+	for _, it := range sl {
+		m, ok := it.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		var c metav1.Condition
+		if v, _, _ := unstructured.NestedString(m, "type"); v != "" {
+			c.Type = v
+		}
+		if v, _, _ := unstructured.NestedString(m, "status"); v != "" {
+			c.Status = metav1.ConditionStatus(v)
+		}
+		if v, _, _ := unstructured.NestedString(m, "reason"); v != "" {
+			c.Reason = v
+		}
+		if v, _, _ := unstructured.NestedString(m, "message"); v != "" {
+			c.Message = v
+		}
+		if v, _, _ := unstructured.NestedString(m, "lastTransitionTime"); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				c.LastTransitionTime = metav1.NewTime(t)
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// patchFSCStatus safely patches status with retry-on-conflict.
+func (r *FileSystemClaimReconciler) patchFSCStatus(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim, mutate func(*fusionv1alpha1.FileSystemClaim)) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// refetch latest to get fresh resourceVersion
+		cur := &fusionv1alpha1.FileSystemClaim{}
+		if err := r.Get(ctx, types.NamespacedName{Name: fsc.Name, Namespace: fsc.Namespace}, cur); err != nil {
+			return err
+		}
+		orig := cur.DeepCopy()
+		mutate(cur)
+		return r.Status().Patch(ctx, cur, client.MergeFrom(orig))
+	})
+}
+
+// patchFSC safely patches metadata and spec updates with retry-on-conflict.
+func (r *FileSystemClaimReconciler) patchFSC(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim, mutate func(*fusionv1alpha1.FileSystemClaim)) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &fusionv1alpha1.FileSystemClaim{}
+		if err := r.Get(ctx, types.NamespacedName{Name: fsc.Name, Namespace: fsc.Namespace}, cur); err != nil {
+			return err
+		}
+		orig := cur.DeepCopy()
+		mutate(cur)
+		return r.Patch(ctx, cur, client.MergeFrom(orig))
+	})
+}
+
+// isOwnedByThisFSC returns true if obj has an OwnerReference to the given FSC name
+// (Kind/APIVersion match; Controller bit not required).
+func isOwnedByThisFSC(obj client.Object, fscName string) bool {
+	for _, or := range obj.GetOwnerReferences() {
+		if or.Kind == "FileSystemClaim" &&
+			or.APIVersion == "fusion.storage.openshift.io/v1alpha1" &&
+			or.Name == fscName {
+			return true
+		}
+	}
+	return false
 }
 
 // isConditionTrue checks if a condition is true in the FileSystemClaim status
@@ -721,28 +1252,6 @@ func (r *FileSystemClaimReconciler) getRandomStorageNode(ctx context.Context) (s
 
 	logger.Info("Selected random storage node", "node", selectedNode, "totalStorageNodes", len(storageNodes))
 	return selectedNode, nil
-}
-
-// TODO handleDeletion handles the deletion of FileSystemClaim and cleans up resources
-func (r *FileSystemClaimReconciler) handleDeletion(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	logger.Info("Handling FileSystemClaim deletion", "name", fsc.Name)
-
-	if controllerutil.ContainsFinalizer(fsc, FileSystemClaimFinalizer) {
-		// TODO: Implement cleanup logic for created resources
-		// This is a placeholder for now as requested
-		logger.Info("Cleanup logic placeholder - would delete LocalDisk, FileSystem, and StorageClass")
-
-		// Remove finalizer
-		controllerutil.RemoveFinalizer(fsc, FileSystemClaimFinalizer)
-		err := r.Update(ctx, fsc)
-		if err != nil {
-			logger.Error(err, "Failed to remove finalizer")
-			return ctrl.Result{}, err
-		}
-	}
-
-	return ctrl.Result{}, nil
 }
 
 // validateDisks checks if the specified disks are present in ALL LocalVolumeDiscoveryResult
@@ -827,7 +1336,9 @@ func (r *FileSystemClaimReconciler) validateDisks(ctx context.Context, fsc *fusi
 	return nil
 }
 
-// BELOW THIS POINT ARE THE HANDLERS FOR WATCHED RESOURCES
+// Helper functions -- END
+
+// Handlers for watched resources -- START
 
 // Handles events from watched resources and enqueues reconciliation
 // requests for the specific FileSystemClaim that owns the resource
@@ -933,6 +1444,8 @@ func didFileSystemStatusChange() builder.WatchesOption {
 		},
 	})
 }
+
+// Handlers for watched resources -- END
 
 // SetupWithManager sets up the controller with the Manager
 func (r *FileSystemClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
