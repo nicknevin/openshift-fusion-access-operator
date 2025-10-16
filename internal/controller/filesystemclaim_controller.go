@@ -820,6 +820,11 @@ func (r *FileSystemClaimReconciler) ensureFileSystem(ctx context.Context, fsc *f
 func (r *FileSystemClaimReconciler) syncFilesystemConditions(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
 	logger := log.FromContext(ctx)
 
+	// Do not surface FilesystemCreated at all until LocalDiskCreated is True.
+	if !r.isConditionTrue(fsc, ConditionTypeLocalDiskCreated) {
+		return false, nil
+	}
+
 	fsList := &unstructured.UnstructuredList{}
 	fsList.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   FileSystemGroup,
@@ -1340,29 +1345,23 @@ func (r *FileSystemClaimReconciler) validateDisks(ctx context.Context, fsc *fusi
 
 // Handlers for watched resources -- START
 
-// Handles events from watched resources and enqueues reconciliation
-// requests for the specific FileSystemClaim that owns the resource
-func (r *FileSystemClaimReconciler) fileSystemClaimHandler(
-	ctx context.Context,
-	obj client.Object,
-) []reconcile.Request {
-	ownerRefs := obj.GetOwnerReferences()
-
-	var requests []reconcile.Request
-	for _, ownerRef := range ownerRefs {
-		if ownerRef.Kind == "FileSystemClaim" &&
-			ownerRef.APIVersion == "fusion.storage.openshift.io/v1alpha1" &&
-			ownerRef.Controller != nil && *ownerRef.Controller {
-			requests = append(requests, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      ownerRef.Name,
-					Namespace: obj.GetNamespace(),
-				},
-			})
+func enqueueFSCByOwner() handler.EventHandler {
+	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		gvk := fusionv1alpha1.GroupVersion.WithKind("FileSystemClaim")
+		owners := obj.GetOwnerReferences()
+		for _, o := range owners {
+			if o.APIVersion == gvk.GroupVersion().String() && o.Kind == gvk.Kind {
+				// LocalDisk and Filesystem are namespaced; owner lives in the same namespace.
+				return []reconcile.Request{{
+					NamespacedName: types.NamespacedName{
+						Namespace: obj.GetNamespace(),
+						Name:      o.Name,
+					},
+				}}
+			}
 		}
-	}
-
-	return requests
+		return nil
+	})
 }
 
 // isInTargetNamespace checks if the resource is in the ibm-spectrum-scale namespace
@@ -1375,8 +1374,7 @@ func isOwnedByFileSystemClaim(obj client.Object) bool {
 	ownerRefs := obj.GetOwnerReferences()
 	for _, ownerRef := range ownerRefs {
 		if ownerRef.Kind == "FileSystemClaim" &&
-			ownerRef.APIVersion == "fusion.storage.openshift.io/v1alpha1" &&
-			ownerRef.Controller != nil && *ownerRef.Controller {
+			ownerRef.APIVersion == "fusion.storage.openshift.io/v1alpha1" {
 			return true
 		}
 	}
@@ -1458,7 +1456,7 @@ func (r *FileSystemClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					"kind":       LocalDiskKind,
 				},
 			},
-			handler.EnqueueRequestsFromMapFunc(r.fileSystemClaimHandler),
+			enqueueFSCByOwner(),
 			didLocalDiskStatusChange(),
 			builder.OnlyMetadata,
 		).
@@ -1469,7 +1467,7 @@ func (r *FileSystemClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					"kind":       FileSystemKind,
 				},
 			},
-			handler.EnqueueRequestsFromMapFunc(r.fileSystemClaimHandler),
+			enqueueFSCByOwner(),
 			didFileSystemStatusChange(),
 			builder.OnlyMetadata,
 		).
