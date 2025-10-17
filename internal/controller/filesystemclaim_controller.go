@@ -68,9 +68,9 @@ const (
 	ReasonStorageClassCreationInProgress = "StorageClassCreationInProgress"
 
 	// VALIDATION CONDITION TYPES
-	ConditionTypeDiskValidated    = "DiskValidated"
-	ReasonDiskValidationFailed    = "DiskValidationFailed"
-	ReasonDiskValidationSucceeded = "DiskValidationSucceeded"
+	ConditionTypeDeviceValidated    = "DeviceValidated"
+	ReasonDeviceValidationFailed    = "DeviceValidationFailed"
+	ReasonDeviceValidationSucceeded = "DeviceValidationSucceeded"
 
 	// OVERALL STATUS CONDITIONS
 	ConditionTypeReady           = "Ready"
@@ -239,9 +239,9 @@ func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *f
 	logger := log.FromContext(ctx)
 
 	// Phase 1: validate once
-	if !r.isConditionTrue(fsc, ConditionTypeDiskValidated) {
-		if err := r.validateDisks(ctx, fsc); err != nil {
-			logger.Error(err, "Disk validation failed")
+	if !r.isConditionTrue(fsc, ConditionTypeDeviceValidated) {
+		if err := r.validateDevices(ctx, fsc); err != nil {
+			logger.Error(err, "Device validation failed")
 			if e := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
 				cur.Status.Conditions = utils.UpdateCondition(
 					cur.Status.Conditions,
@@ -253,9 +253,9 @@ func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *f
 				)
 				cur.Status.Conditions = utils.UpdateCondition(
 					cur.Status.Conditions,
-					ConditionTypeDiskValidated,
+					ConditionTypeDeviceValidated,
 					metav1.ConditionFalse,
-					ReasonDiskValidationFailed,
+					ReasonDeviceValidationFailed,
 					err.Error(),
 					cur.Generation,
 				)
@@ -269,21 +269,21 @@ func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *f
 		if e := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
 			cur.Status.Conditions = utils.UpdateCondition(
 				cur.Status.Conditions,
-				ConditionTypeDiskValidated,
+				ConditionTypeDeviceValidated,
 				metav1.ConditionTrue,
-				ReasonDiskValidationSucceeded,
-				"Disk/s validation succeeded",
+				ReasonDeviceValidationSucceeded,
+				"Device/s validation succeeded",
 				cur.Generation,
 			)
 		}); e != nil {
-			logger.Error(e, "Failed to update status after disk validation success")
+			logger.Error(e, "Failed to update status after device validation success")
 			return false, e
 		}
 		return true, nil
 	}
 
 	// Phase 2: ensure LocalDisks
-	for index, devicePath := range fsc.Spec.Disks {
+	for index, devicePath := range fsc.Spec.Devices {
 		localDiskName := fmt.Sprintf("%s-ld-%d", fsc.Name, index)
 
 		ld := &unstructured.Unstructured{}
@@ -302,7 +302,7 @@ func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *f
 		case errors.IsNotFound(err):
 			nodeName, selErr := r.getRandomStorageNode(ctx)
 			if selErr != nil {
-				logger.Error(selErr, "failed to pick a storage node", "disk", devicePath)
+				logger.Error(selErr, "failed to pick a storage node", "device", devicePath)
 				if e := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
 					cur.Status.Conditions = utils.UpdateCondition(
 						cur.Status.Conditions,
@@ -427,7 +427,7 @@ func (r *FileSystemClaimReconciler) syncLocalDiskConditions(ctx context.Context,
 
 	// 2) If none yet but validated, mark in-progress (idempotent)
 	if len(owned) == 0 {
-		if r.isConditionTrue(fsc, ConditionTypeDiskValidated) {
+		if r.isConditionTrue(fsc, ConditionTypeDeviceValidated) {
 			desiredStatus := metav1.ConditionFalse
 			desiredReason := ReasonLocalDiskCreationInProgress
 			desiredMsg := "Waiting for LocalDisk objects to appear"
@@ -1075,7 +1075,7 @@ func (r *FileSystemClaimReconciler) ensureStorageClass(ctx context.Context, fsc 
 // syncFSCReady aggregates the overall Ready condition from the sub-conditions.
 func (r *FileSystemClaimReconciler) syncFSCReady(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
 	readyNow :=
-		r.isConditionTrue(fsc, ConditionTypeDiskValidated) &&
+		r.isConditionTrue(fsc, ConditionTypeDeviceValidated) &&
 			r.isConditionTrue(fsc, ConditionTypeLocalDiskCreated) &&
 			r.isConditionTrue(fsc, ConditionTypeFileSystemCreated) &&
 			r.isConditionTrue(fsc, ConditionTypeStorageClassCreated)
@@ -1259,11 +1259,11 @@ func (r *FileSystemClaimReconciler) getRandomStorageNode(ctx context.Context) (s
 	return selectedNode, nil
 }
 
-// validateDisks checks if the specified disks are present in ALL LocalVolumeDiscoveryResult
+// validateDevices checks if the specified devices are present in ALL LocalVolumeDiscoveryResult
 // which ensures both the device is valid and shared across all nodes.
 // When this function is called.
 // return a human readable error message.
-func (r *FileSystemClaimReconciler) validateDisks(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) error {
+func (r *FileSystemClaimReconciler) validateDevices(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) error {
 	logger := log.FromContext(ctx)
 
 	allNodes := &metav1.PartialObjectMetadataList{}
@@ -1313,29 +1313,29 @@ func (r *FileSystemClaimReconciler) validateDisks(ctx context.Context, fsc *fusi
 	}
 
 	// For each device, check if it exists in ALL LVDRs
-	for _, disk := range fsc.Spec.Disks {
+	for _, device := range fsc.Spec.Devices {
 		for nodeName, lvdr := range lvdrs {
 			// Check if DiscoveredDevices exists and is not empty
 			if len(lvdr.Status.DiscoveredDevices) == 0 {
-				return fmt.Errorf("no discovered disks available for node %s. "+
-					"Disk: %s may be in use in another filesystem or is not "+
-					"shared across all nodes", nodeName, disk)
+				return fmt.Errorf("no discovered devices available for node %s. "+
+					"Device: %s may be in use in another filesystem or is not "+
+					"shared across all nodes", nodeName, device)
 			}
 
-			diskFound := false
-			for _, discoveredDisk := range lvdr.Status.DiscoveredDevices {
-				if discoveredDisk.Path == disk {
-					diskFound = true
+			deviceFound := false
+			for _, discoveredDevice := range lvdr.Status.DiscoveredDevices {
+				if discoveredDevice.Path == device {
+					deviceFound = true
 					break
 				}
 			}
 
-			if !diskFound {
-				return fmt.Errorf("device %s not found in LocalVolumeDiscoveryResult for node %s", disk, nodeName)
+			if !deviceFound {
+				return fmt.Errorf("device %s not found in LocalVolumeDiscoveryResult for node %s", device, nodeName)
 			}
 		}
 
-		logger.Info("Device validation successful", "disk", disk, "availableOnAllNodesWithWorkerAndstorageLabel", len(lvdrs))
+		logger.Info("Device validation successful", "device", device, "availableOnAllNodesWithWorkerAndstorageLabel", len(lvdrs))
 	}
 
 	return nil

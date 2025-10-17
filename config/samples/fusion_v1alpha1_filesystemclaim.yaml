@@ -6,8 +6,8 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: filesystemclaim-sample
 spec:
-  localdisks:
-    - device: "/dev/sdb"
-      node: "node1"
-    - device: "/dev/sdc"
-      node: "node1"
+  devices:
+    - "/dev/nvme0n1"
+    - "/dev/nvme1n1"
+    - "/dev/nvme2n1"
+

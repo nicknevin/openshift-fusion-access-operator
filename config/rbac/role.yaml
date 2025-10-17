@@ -246,6 +246,7 @@ rules:
 - apiGroups:
   - fusion.storage.openshift.io
   resources:
+  - filesystemclaims
   - fusionaccesses
   - localvolumediscoveries
   - localvolumediscoveries/status
@@ -262,12 +263,14 @@ rules:
 - apiGroups:
   - fusion.storage.openshift.io
   resources:
+  - filesystemclaims/finalizers
   - fusionaccesses/finalizers
   verbs:
   - update
 - apiGroups:
   - fusion.storage.openshift.io
   resources:
+  - filesystemclaims/status
   - fusionaccesses/status
   verbs:
   - get

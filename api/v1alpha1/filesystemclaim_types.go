@@ -22,8 +22,8 @@ import (
 
 // FileSystemClaimSpec defines the desired state of FileSystemClaim.
 type FileSystemClaimSpec struct {
-	// Disks is a list of device paths to be used for the file system. For example, ["/dev/sda", "/dev/sdb"]
-	Disks []string `json:"disks,omitempty"`
+	// Devices is a list of device paths to be used for the file system. For example, ["/dev/sda", "/dev/sdb"]
+	Devices []string `json:"devices,omitempty"`
 }
 
 // FileSystemClaimStatus defines the observed state of FileSystemClaim.
