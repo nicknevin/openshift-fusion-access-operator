@@ -719,22 +719,6 @@ func (r *FileSystemClaimReconciler) syncFSCReady(ctx context.Context, fsc *fusio
 
 // Helper functions -- START
 
-// helper function to get a nested string from a map[string]interface{}
-func getNestedString(obj map[string]interface{}, fields ...string) string {
-	cur := obj
-	for i := 0; i < len(fields)-1; i++ {
-		m, _ := cur[fields[i]].(map[string]interface{})
-		cur = m
-		if cur == nil {
-			return ""
-		}
-	}
-	if v, ok := cur[fields[len(fields)-1]].(string); ok {
-		return v
-	}
-	return ""
-}
-
 // convert unstructured.Slice to metav1.Condition
 func asMetaConditions(sl []interface{}) []metav1.Condition {
 	out := make([]metav1.Condition, 0, len(sl))
