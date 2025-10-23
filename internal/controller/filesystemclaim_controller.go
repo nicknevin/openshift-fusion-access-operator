@@ -244,7 +244,11 @@ func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *f
 
 	// If LocalDisks are already created, no need to create them again
 	if r.isConditionTrue(fsc, ConditionTypeLocalDiskCreated) {
-		logger.Info("condition is true, no need to create LocalDisks", "condition", ConditionTypeLocalDiskCreated)
+		return false, nil
+	}
+
+	// If localDisk creation is in progress, no need to create LocalDisks again
+	if r.hasConditionWithReason(fsc.Status.Conditions, ConditionTypeLocalDiskCreated, ReasonLocalDiskCreationInProgress) {
 		return false, nil
 	}
 
@@ -279,6 +283,7 @@ func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *f
 	// Phase 2: ensure LocalDisks
 	for _, devicePath := range fsc.Spec.Devices {
 		// Get WWN for the device
+		// this will fail if the device is not found in any of the LocalVolumeDiscoveryResult
 		wwn, err := r.getDeviceWWN(ctx, devicePath, nodeName)
 		if err != nil {
 			logger.Error(err, "failed to get WWN for device", "device", devicePath, "node", nodeName)
@@ -334,26 +339,11 @@ func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *f
 
 		default:
 			// Check for drift and patch if needed
-			desiredSpec := map[string]interface{}{
-				"device": devicePath,
-				"node":   nodeName,
-			}
-
-			changed, err := r.detectAndPatchDrift(ctx, ld, func(obj client.Object) bool {
-				u := obj.(*unstructured.Unstructured)
-				currentSpec, _, _ := unstructured.NestedMap(u.Object, "spec")
-				if !reflect.DeepEqual(currentSpec, desiredSpec) {
-					u.Object["spec"] = desiredSpec
-					return true
-				}
-				return false
-			})
-			if err != nil {
-				return false, fmt.Errorf("patch LocalDisk %s: %w", localDiskName, err)
-			}
-			if changed {
-				return true, nil
-			}
+			// There is a admission webhook that prevents the update of spec.device, spec.node and spec.thinDiskType after the LocalDisk is created.
+			// example error:
+			// ... cannot be edited because a related NSD is already created in Storage Scale
+			logger.Info("localDisk already exists, skipping drift detection and patching", "name", localDiskName)
+			return false, nil
 		}
 	}
 	return false, nil
@@ -718,6 +708,12 @@ func (r *FileSystemClaimReconciler) syncFSCReady(ctx context.Context, fsc *fusio
 // Handlers for FileSystemClaim reconciliation -- END
 
 // Helper functions -- START
+
+// hasConditionWithReason checks if a condition exists with the given type and reason
+func (r *FileSystemClaimReconciler) hasConditionWithReason(conds []metav1.Condition, condType, reason string) bool {
+	cond := apimeta.FindStatusCondition(conds, condType)
+	return cond != nil && cond.Reason == reason
+}
 
 // convert unstructured.Slice to metav1.Condition
 func asMetaConditions(sl []interface{}) []metav1.Condition {
