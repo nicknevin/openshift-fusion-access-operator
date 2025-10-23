@@ -212,6 +212,10 @@ build: manifests generate fmt vet ## Build manager binary.
 run: manifests generate fmt vet ## Run a controller from your host.
 	GOOS=${GOOS} GOARCH=${GOARCH} hack/build.sh run
 
+.PHONY: debug
+debug: manifests generate fmt vet ## Run and debug a controller from your host.
+	GOOS=${GOOS} GOARCH=${GOARCH} hack/build.sh debug
+
 .PHONY: clean
 clean: ## Remove build artifacts
 	rm -rf ./bundle
