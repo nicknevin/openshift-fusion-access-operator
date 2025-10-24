@@ -109,8 +109,8 @@ The operator is distributed through the OpenShift OperatorHub:
 
 The operator currently supports:
 - IBM Storage Scale v5.2.3.1
-- OpenShift 4.19 (Exclusively)
-- Architecture: x86_64, ppc64le, s390x
+- OpenShift 4.19 (exclusively)
+- Architecture: x86_64
 
 ## Security Considerations
 

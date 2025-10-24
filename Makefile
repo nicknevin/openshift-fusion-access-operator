@@ -19,9 +19,6 @@ OPERATOR_DOCKERFILE ?= operator.Dockerfile
 DEVICEFINDER_DOCKERFILE ?= devicefinder.Dockerfile
 CONSOLE_PLUGIN_DOCKERFILE ?= console-plugin.Dockerfile
 
-# Version of yaml file to generate rbacs from
-RBAC_VERSION ?= v5.2.3.1
-
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
 # To re-generate a bundle for other specific channels without changing the standard setup, you can:
@@ -209,11 +206,14 @@ run: manifests generate fmt vet ## Run a controller from your host.
 	GOOS=${GOOS} GOARCH=${GOARCH} hack/build.sh run
 
 .PHONY: clean
-clean: ## Remove build artifacts and downloaded tools
-	rm -rf ./bundle
-	find bin/ -exec chmod +w "{}" \;
-	rm -rf ./manager ./bin/* ./cover.out ./coverage.html
+clean: ## Remove build artifacts
+	rm -rf ./bundle ./manager ./cover.out ./coverage.html
 	rm -f ./config/samples/fusionaccess-catalog-*.yaml
+
+.PHONY: clobber
+clobber: clean ## Remove build artifacts and downloaded tools
+	find bin/ -exec chmod +w "{}" \;
+	rm -rf ./bin/*
 
 # Generate Dockerfile using the template. It uses envsubst to replace the value of the version label in the container
 .PHONY: generate-dockerfile-operator
@@ -420,7 +420,7 @@ ifeq (,$(shell which opm 2>/dev/null))
 	set -e ;\
 	mkdir -p $(dir $(OPM)) ;\
 	OS=$(shell go env GOOS) && ARCH=$(shell go env GOARCH) && \
-	curl -sSLo $(OPM) https://github.com/operator-framework/operator-registry/releases/download/v1.23.0/$${OS}-$${ARCH}-opm ;\
+	curl -sSLo $(OPM) https://github.com/operator-framework/operator-registry/releases/download/v1.60.0/$${OS}-$${ARCH}-opm ;\
 	chmod +x $(OPM) ;\
 	}
 else
@@ -466,8 +466,6 @@ config/samples/fusionaccess-catalog-$(VERSION).yaml:
 fetchyaml: ## Fetches install yaml files
 	./scripts/fetch-install-yamls.sh
 
-.PHONY: rbacs-generates
-rbacs-generate: ## Generates RBACs and injects them in .go file
-	CMD_OUTPUT=$$(go run scripts/create-rbacs.go "files/$(RBAC_VERSION)/install.yaml"); \
-	$(SED) -i '/IBM_RBAC_MARKER_START/,/IBM_RBAC_MARKER_END/{//!d}' internal/controller/fusionaccess_controller.go; \
-	$(SED) -i "/IBM_RBAC_MARKER_START/ r /dev/stdin" internal/controller/fusionaccess_controller.go <<< "$$CMD_OUTPUT"
+.PHONY: tool-versions
+tool-versions: opm
+	$(OPM) version
