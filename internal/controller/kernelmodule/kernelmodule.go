@@ -364,6 +364,7 @@ FROM ${IBM_SCALE} as src_image
 FROM ${DTK_AUTO} as builder
 ARG KERNEL_FULL_VERSION
 COPY --from=src_image /usr/lpp/mmfs /usr/lpp/mmfs
+RUN sed -i -e '/gpfsBaseVersion !=/,+9d' /usr/lpp/mmfs/bin/mmbuildgpl
 RUN /usr/lpp/mmfs/bin/mmbuildgpl
 RUN mkdir -p /opt/lib/modules/${KERNEL_FULL_VERSION}/
 RUN cp -avf /lib/modules/${KERNEL_FULL_VERSION}/extra/*.ko /opt/lib/modules/${KERNEL_FULL_VERSION}/
