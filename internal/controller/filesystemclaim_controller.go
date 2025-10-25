@@ -203,7 +203,7 @@ func (r *FileSystemClaimReconciler) handleFinalizers(ctx context.Context, fsc *f
 	logger := log.FromContext(ctx)
 
 	if !controllerutil.ContainsFinalizer(fsc, FileSystemClaimFinalizer) {
-		if err := r.patchFSC(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+		if err := r.patchFSCSpec(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
 			controllerutil.AddFinalizer(cur, FileSystemClaimFinalizer)
 		}); err != nil {
 			logger.Error(err, "Failed to add finalizer")
@@ -226,7 +226,7 @@ func (r *FileSystemClaimReconciler) handleDeletion(ctx context.Context, fsc *fus
 	if controllerutil.ContainsFinalizer(fsc, FileSystemClaimFinalizer) {
 		logger.Info("Cleanup logic placeholder - would delete LocalDisk, FileSystem, and StorageClass")
 
-		if err := r.patchFSC(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+		if err := r.patchFSCSpec(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
 			controllerutil.RemoveFinalizer(cur, FileSystemClaimFinalizer)
 		}); err != nil {
 			logger.Error(err, "Failed to remove finalizer")
@@ -460,6 +460,7 @@ func (r *FileSystemClaimReconciler) ensureFileSystem(ctx context.Context, fsc *f
 
 	desiredSpec := buildFilesystemSpec(ldNames)
 
+	// List existing owned Filesystems
 	owned, err := r.listOwnedResources(ctx, fsc, schema.GroupVersionKind{
 		Group:   FileSystemGroup,
 		Version: FileSystemVersion,
@@ -471,6 +472,7 @@ func (r *FileSystemClaimReconciler) ensureFileSystem(ctx context.Context, fsc *f
 
 	switch len(owned) {
 	case 0:
+		// No existing Filesystems found, create a new one
 		fsName := fsc.Name
 
 		fs := &unstructured.Unstructured{}
@@ -495,6 +497,7 @@ func (r *FileSystemClaimReconciler) ensureFileSystem(ctx context.Context, fsc *f
 		return true, nil
 
 	case 1:
+		// One existing Filesystem found, check for drift and patch if needed
 		fs := &owned[0]
 		changed, err := r.detectAndPatchDrift(ctx, fs, func(obj client.Object) bool {
 			u := obj.(*unstructured.Unstructured)
@@ -511,6 +514,7 @@ func (r *FileSystemClaimReconciler) ensureFileSystem(ctx context.Context, fsc *f
 		return changed, nil
 
 	default:
+		// More than one existing Filesystem found, error out
 		msg := fmt.Sprintf("found %d Filesystems owned by FSC; expected 1", len(owned))
 		if e := r.handleResourceCreationError(ctx, fsc, "Filesystem", fmt.Errorf(msg)); e != nil {
 			return false, e
@@ -761,7 +765,7 @@ func (r *FileSystemClaimReconciler) patchFSCStatus(ctx context.Context, fsc *fus
 }
 
 // patchFSC safely patches metadata and spec updates with retry-on-conflict.
-func (r *FileSystemClaimReconciler) patchFSC(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim, mutate func(*fusionv1alpha1.FileSystemClaim)) error {
+func (r *FileSystemClaimReconciler) patchFSCSpec(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim, mutate func(*fusionv1alpha1.FileSystemClaim)) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &fusionv1alpha1.FileSystemClaim{}
 		if err := r.Get(ctx, types.NamespacedName{Name: fsc.Name, Namespace: fsc.Namespace}, cur); err != nil {
@@ -1168,11 +1172,12 @@ func (r *FileSystemClaimReconciler) checkAllResourcesHealthy(
 
 		// Check all required conditions
 		for _, conditionType := range requiredConditions {
-			if conditionType == "Ready" {
+			switch conditionType {
+			case "Ready":
 				if isMatch, msg := checkResourceCondition(conds, "Ready", metav1.ConditionTrue); !isMatch {
 					return false, resource.GetName(), msg, false
 				}
-			} else if conditionType == "Used" {
+			case "Used":
 				// Special handling for Used condition
 				usedCondition := apimeta.FindStatusCondition(conds, "Used")
 				if usedCondition == nil {
@@ -1187,6 +1192,14 @@ func (r *FileSystemClaimReconciler) checkAllResourcesHealthy(
 						}
 						return false, resource.GetName(), fmt.Sprintf("LocalDisk is used by different filesystem %q", fsName), true
 					}
+				}
+			case "Success":
+				if isMatch, msg := checkResourceCondition(conds, "Success", metav1.ConditionTrue); !isMatch {
+					return false, resource.GetName(), msg, false
+				}
+			case "Healthy":
+				if isMatch, msg := checkResourceCondition(conds, "Healthy", metav1.ConditionTrue); !isMatch {
+					return false, resource.GetName(), msg, false
 				}
 			}
 		}
