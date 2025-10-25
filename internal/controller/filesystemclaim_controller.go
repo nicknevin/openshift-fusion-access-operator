@@ -18,12 +18,14 @@ package controller
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"fmt"
-	"math/rand"
+	"math/big"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -52,6 +54,8 @@ import (
 const (
 	// FileSystemClaimFinalizer is the finalizer name for cleanup operations
 	FileSystemClaimFinalizer = "fusion.storage.openshift.io/filesystemclaim-finalizer"
+
+	maxKubernetesNameLength = 253
 
 	// Reasource Creation Condition types
 	ConditionTypeLocalDiskCreated     = "LocalDiskCreated"
@@ -127,7 +131,7 @@ func (r *FileSystemClaimReconciler) Reconcile(
 	fsc := &fusionv1alpha1.FileSystemClaim{}
 	err := r.Get(ctx, req.NamespacedName, fsc)
 	if err != nil {
-		logger.Error(err, "Failed to get FileSystemClaim:"+req.NamespacedName.Name)
+		logger.Error(err, "Failed to get FileSystemClaim", "name", req.Name)
 		return ctrl.Result{}, err
 	}
 	logger.Info("Reconciling FileSystemClaim", "name", fsc.Name, "namespace", fsc.Namespace)
@@ -193,7 +197,6 @@ func (r *FileSystemClaimReconciler) Reconcile(
 
 	logger.Info("FileSystemClaim reconciliation completed successfully")
 	return ctrl.Result{}, nil
-
 }
 
 // Handlers for FileSystemClaim reconciliation -- START
@@ -340,7 +343,7 @@ func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *f
 			continue
 
 		case err != nil:
-			return false, fmt.Errorf("Failed to get LocalDisk %s: %w", localDiskName, err)
+			return false, fmt.Errorf("failed to get LocalDisk %s: %w", localDiskName, err)
 
 		default:
 			// Check for drift and patch if needed
@@ -526,7 +529,8 @@ func (r *FileSystemClaimReconciler) ensureFileSystem(ctx context.Context, fsc *f
 	default:
 		// More than one existing Filesystem found, error out
 		msg := fmt.Sprintf("found %d Filesystems owned by FSC; expected 1", len(owned))
-		if e := r.handleResourceCreationError(ctx, fsc, "Filesystem", fmt.Errorf(msg)); e != nil {
+		err := fmt.Errorf("%s", msg)
+		if e := r.handleResourceCreationError(ctx, fsc, "Filesystem", err); e != nil {
 			return false, e
 		}
 		return true, nil
@@ -826,7 +830,8 @@ func (r *FileSystemClaimReconciler) getRandomStorageNode(ctx context.Context) (s
 
 	// Filter nodes with both worker and storage labels
 	var storageNodes []string
-	for _, node := range allNodes.Items {
+	for i := range allNodes.Items {
+		node := &allNodes.Items[i]
 		labels := node.GetLabels()
 		_, hasWorkerLabel := labels[WorkerNodeRoleLabel]
 		hasStorageLabel := labels[ScaleStorageRoleLabel] == ScaleStorageRoleValue
@@ -842,8 +847,11 @@ func (r *FileSystemClaimReconciler) getRandomStorageNode(ctx context.Context) (s
 	}
 
 	// Return random node
-	randomIndex := rand.Intn(len(storageNodes))
-	selectedNode := storageNodes[randomIndex]
+	idx, err := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(len(storageNodes))))
+	if err != nil {
+		return "", fmt.Errorf("failed to select random storage node: %w", err)
+	}
+	selectedNode := storageNodes[idx.Int64()]
 
 	logger.Info("Selected random storage node", "node", selectedNode, "totalStorageNodes", len(storageNodes))
 	return selectedNode, nil
@@ -866,7 +874,8 @@ func (r *FileSystemClaimReconciler) validateDevices(ctx context.Context, fsc *fu
 	}
 
 	lvdrs := make(map[string]*fusionv1alpha1.LocalVolumeDiscoveryResult)
-	for _, node := range allNodes.Items {
+	for i := range allNodes.Items {
+		node := &allNodes.Items[i]
 		labels := node.GetLabels()
 		_, hasWorkerLabel := labels[WorkerNodeRoleLabel]
 		hasStorageLabel := labels[ScaleStorageRoleLabel] == ScaleStorageRoleValue
@@ -977,7 +986,7 @@ func (r *FileSystemClaimReconciler) getDeviceWWN(
 }
 
 // generateLocalDiskName generates a LocalDisk name from device path and WWN
-func generateLocalDiskName(devicePath string, wwn string) (string, error) {
+func generateLocalDiskName(devicePath, wwn string) (string, error) {
 	// Extract device name from path (e.g., /dev/nvme1n1 -> nvme1n1)
 	deviceName := filepath.Base(devicePath)
 	if deviceName == "" || deviceName == "." {
@@ -996,7 +1005,7 @@ func generateLocalDiskName(devicePath string, wwn string) (string, error) {
 	name := fmt.Sprintf("%s-%s", deviceName, cleanWWN)
 
 	// Validate Kubernetes resource name constraints
-	if len(name) > 253 {
+	if len(name) > maxKubernetesNameLength {
 		return "", fmt.Errorf("generated name too long: %s (max 253 chars)", name)
 	}
 
@@ -1010,12 +1019,14 @@ func generateLocalDiskName(devicePath string, wwn string) (string, error) {
 
 // isValidKubernetesName checks if a string is a valid Kubernetes resource name
 func isValidKubernetesName(name string) bool {
-	if len(name) == 0 || len(name) > 253 {
+	if name == "" || len(name) > maxKubernetesNameLength {
 		return false
 	}
 
 	// Must start and end with alphanumeric character
-	if !isAlphanumeric([]rune(name)[0]) || !isAlphanumeric([]rune(name)[len([]rune(name))-1]) {
+	first, _ := utf8.DecodeRuneInString(name)
+	last, _ := utf8.DecodeLastRuneInString(name)
+	if !isAlphanumeric(first) || !isAlphanumeric(last) {
 		return false
 	}
 
@@ -1157,7 +1168,7 @@ func checkResourceCondition(
 	conds []metav1.Condition,
 	conditionType string,
 	expectedStatus metav1.ConditionStatus,
-) (bool, string) {
+) (matched bool, message string) {
 	condition := apimeta.FindStatusCondition(conds, conditionType)
 	if condition == nil {
 		return false, fmt.Sprintf("%s condition not found", conditionType)
@@ -1173,7 +1184,7 @@ func (r *FileSystemClaimReconciler) checkAllResourcesHealthy(
 	resources []unstructured.Unstructured,
 	requiredConditions []string,
 	ownedFilesystems map[string]struct{},
-) (allHealthy bool, failingName string, failingMsg string, hardFailure bool) {
+) (allHealthy bool, failingName, failingMsg string, hardFailure bool) {
 	for _, resource := range resources {
 		conds, err := extractResourceConditions(&resource)
 		if err != nil {
@@ -1310,7 +1321,7 @@ func buildFilesystemSpec(ldNames []string) map[string]interface{} {
 // Handlers for watched resources -- START
 
 func enqueueFSCByOwner() handler.EventHandler {
-	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+	return handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
 		gvk := fusionv1alpha1.GroupVersion.WithKind("FileSystemClaim")
 		owners := obj.GetOwnerReferences()
 		for _, o := range owners {
@@ -1345,63 +1356,26 @@ func isOwnedByFileSystemClaim(obj client.Object) bool {
 	return false
 }
 
-// didLocalDiskStatusChange returns true if the LocalDisk status has changed
-func didLocalDiskStatusChange() builder.WatchesOption {
+// didResourceStatusChange returns true if the LocalDisk or FileSystem status has changed
+func didResourceStatusChange() builder.WatchesOption {
 	return builder.WithPredicates(predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool {
-			return false // We don't care about create events for LocalDisk
-		},
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			// Check namespace and ownership first (using metadata only)
-			if !isInTargetNamespace(e.ObjectNew) || !isOwnedByFileSystemClaim(e.ObjectNew) {
-				return false
-			}
-
-			// Check if generation is unchanged (no spec change)
-			generationUnchanged := e.ObjectOld.GetGeneration() == e.ObjectNew.GetGeneration()
-
-			// Check if resourceVersion changed (something changed)
-			resourceVersionChanged := e.ObjectOld.GetResourceVersion() != e.ObjectNew.GetResourceVersion()
-
-			// Only trigger if generation unchanged (no spec change) but
-			// resourceVersion changed meaning status/metadata change
-			return generationUnchanged && resourceVersionChanged
-		},
-		DeleteFunc: func(e event.DeleteEvent) bool {
-			return false // We don't care about delete events for LocalDisk
-		},
-		GenericFunc: func(e event.GenericEvent) bool {
+		CreateFunc: func(_ event.CreateEvent) bool {
 			return false
 		},
-	})
-}
-
-// didFileSystemStatusChange returns true if the FileSystem status has changed
-func didFileSystemStatusChange() builder.WatchesOption {
-	return builder.WithPredicates(predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool {
-			return false // We don't care about create events for FileSystem
-		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			// Check namespace and ownership first (using metadata only)
 			if !isInTargetNamespace(e.ObjectNew) || !isOwnedByFileSystemClaim(e.ObjectNew) {
 				return false
 			}
 
-			// Check if generation is unchanged (no spec change)
 			generationUnchanged := e.ObjectOld.GetGeneration() == e.ObjectNew.GetGeneration()
-
-			// Check if resourceVersion changed (something changed)
 			resourceVersionChanged := e.ObjectOld.GetResourceVersion() != e.ObjectNew.GetResourceVersion()
 
-			// Only trigger if generation unchanged (no spec change) but
-			// resourceVersion changed meaning status/metadata change
 			return generationUnchanged && resourceVersionChanged
 		},
-		DeleteFunc: func(e event.DeleteEvent) bool {
-			return false // We don't care about delete events for FileSystem
+		DeleteFunc: func(_ event.DeleteEvent) bool {
+			return false
 		},
-		GenericFunc: func(e event.GenericEvent) bool {
+		GenericFunc: func(_ event.GenericEvent) bool {
 			return false
 		},
 	})
@@ -1421,7 +1395,7 @@ func (r *FileSystemClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				},
 			},
 			enqueueFSCByOwner(),
-			didLocalDiskStatusChange(),
+			didResourceStatusChange(),
 			builder.OnlyMetadata,
 		).
 		Watches(
@@ -1432,7 +1406,7 @@ func (r *FileSystemClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				},
 			},
 			enqueueFSCByOwner(),
-			didFileSystemStatusChange(),
+			didResourceStatusChange(),
 			builder.OnlyMetadata,
 		).
 		Named("filesystemclaim").
