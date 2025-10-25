@@ -280,6 +280,9 @@ func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *f
 		return true, nil
 	}
 
+	// variable to track if we need to requeue the reconciliation
+	var requeue bool
+
 	// Phase 2: ensure LocalDisks
 	for _, devicePath := range fsc.Spec.Devices {
 		// Get WWN for the device
@@ -332,7 +335,9 @@ func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *f
 			if _, e := r.updateConditionIfChanged(ctx, fsc, ConditionTypeLocalDiskCreated, metav1.ConditionFalse, ReasonLocalDiskCreationInProgress, "LocalDisks created, waiting for them to become ready"); e != nil {
 				return false, e
 			}
-			return true, nil
+
+			requeue = true
+			continue
 
 		case err != nil:
 			return false, fmt.Errorf("Failed to get LocalDisk %s: %w", localDiskName, err)
@@ -346,6 +351,11 @@ func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *f
 			return false, nil
 		}
 	}
+
+	if requeue {
+		return true, nil
+	}
+
 	return false, nil
 }
 
