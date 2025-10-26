@@ -49,6 +49,7 @@ import (
 	"github.com/openshift-storage-scale/openshift-fusion-access-operator/internal/utils"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -103,6 +104,11 @@ const (
 	ScaleStorageRoleLabel = "scale.spectrum.ibm.com/role"
 	ScaleStorageRoleValue = "storage"
 	WorkerNodeRoleLabel   = "node-role.kubernetes.io/worker"
+
+	// Labels
+	FileSystemClaimOwnedByNameLabel      = "fusion.storage.openshift.io/owned-by-fsc-name"
+	FileSystemClaimOwnedByNamespaceLabel = "fusion.storage.openshift.io/owned-by-fsc-namespace"
+	StorageClassDefaultAnnotation        = "storageclass.kubevirt.io/is-default-virt-class"
 )
 
 // FileSystemClaimReconciler reconciles a FileSystemClaim object
@@ -334,7 +340,7 @@ func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *f
 		switch {
 		case errors.IsNotFound(err):
 			// Create LocalDisk with new naming
-			spec := map[string]interface{}{"device": devicePath, "node": nodeName}
+			spec := map[string]any{"device": devicePath, "node": nodeName}
 			if err := r.createResourceWithOwnership(ctx, fsc, ld, spec); err != nil {
 				logger.Error(err, "failed to create LocalDisk", "name", localDiskName)
 				if e := r.handleResourceCreationError(ctx, fsc, "LocalDisk", err); e != nil {
@@ -446,6 +452,8 @@ func (r *FileSystemClaimReconciler) syncLocalDiskConditions(ctx context.Context,
 
 	if !changed {
 		logger.Info("LocalDiskCreated condition unchanged; skipping patch")
+		// there was no change, so we don't need to requeue
+		return false, nil
 	}
 
 	logger.Info("synced LocalDisk conditions", "fsc", fsc.Name, "owned", len(owned), "allGood", allGood)
@@ -455,7 +463,6 @@ func (r *FileSystemClaimReconciler) syncLocalDiskConditions(ctx context.Context,
 // ensureFileSystem creates FileSystem if it doesn't exist and returns its ready status
 func (r *FileSystemClaimReconciler) ensureFileSystem(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("ensureFileSystem", "name", fsc.Name)
 
 	// If localdisks are not created, we can't create a filesystem
 	if !r.isConditionTrue(fsc, ConditionTypeLocalDiskCreated) {
@@ -594,6 +601,8 @@ func (r *FileSystemClaimReconciler) syncFilesystemConditions(ctx context.Context
 
 	if !changed {
 		logger.Info("FilesystemCreated condition unchanged; skipping patch")
+		// there was no change, so we don't need to requeue
+		return false, nil
 	}
 
 	logger.Info("synced Filesystem conditions", "fsc", fsc.Name, "owned", len(owned), "status", string(desiredStatus))
@@ -612,36 +621,14 @@ func (r *FileSystemClaimReconciler) ensureStorageClass(ctx context.Context, fsc 
 	scName := fsc.Name // Use FSC name directly
 	fsName := fsc.Name // the Filesystem name we created
 
-	allowExpand := true
-	reclaim := corev1.PersistentVolumeReclaimDelete
-	bindMode := storagev1.VolumeBindingImmediate
-
-	desired := &storagev1.StorageClass{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: scName,
-			Annotations: map[string]string{
-				"storageclass.kubevirt.io/is-default-virt-class": "true",
-			},
-			Labels: map[string]string{
-				"fusion.storage.openshift.io/owned-by-name":      fsc.Name,
-				"fusion.storage.openshift.io/owned-by-namespace": fsc.Namespace,
-			},
-		},
-		Provisioner:          "spectrumscale.csi.ibm.com",
-		AllowVolumeExpansion: &allowExpand,
-		ReclaimPolicy:        &reclaim,
-		VolumeBindingMode:    &bindMode,
-		Parameters: map[string]string{
-			"volBackendFs": fsName, // << template requires this key
-		},
-	}
+	desired := buildStorageClass(fsc, scName, fsName)
 
 	current := &storagev1.StorageClass{}
 	err := r.Get(ctx, types.NamespacedName{Name: scName}, current)
 	switch {
 	case errors.IsNotFound(err):
 		logger.Info("Creating StorageClass", "name", scName, "filesystem", fsName)
-		if err := r.Create(ctx, desired); err != nil {
+		if err := r.Create(ctx, desired.DeepCopy()); err != nil {
 			if e := r.handleResourceCreationError(ctx, fsc, "StorageClass", err); e != nil {
 				return false, e
 			}
@@ -660,47 +647,7 @@ func (r *FileSystemClaimReconciler) ensureStorageClass(ctx context.Context, fsc 
 
 	default:
 		// StorageClass exists - check for drift and patch if needed
-		changed, err := r.detectAndPatchDrift(ctx, current, func(obj client.Object) bool {
-			sc := obj.(*storagev1.StorageClass)
-
-			// Compare the entire current StorageClass with desired
-			// We only care about the fields we manage
-			currentRelevant := &storagev1.StorageClass{
-				ObjectMeta: metav1.ObjectMeta{
-					Annotations: sc.Annotations,
-					Labels:      sc.Labels,
-				},
-				Provisioner:          sc.Provisioner,
-				AllowVolumeExpansion: sc.AllowVolumeExpansion,
-				ReclaimPolicy:        sc.ReclaimPolicy,
-				VolumeBindingMode:    sc.VolumeBindingMode,
-				Parameters:           sc.Parameters,
-			}
-
-			desiredRelevant := &storagev1.StorageClass{
-				ObjectMeta: metav1.ObjectMeta{
-					Annotations: desired.Annotations,
-					Labels:      desired.Labels,
-				},
-				Provisioner:          desired.Provisioner,
-				AllowVolumeExpansion: desired.AllowVolumeExpansion,
-				ReclaimPolicy:        desired.ReclaimPolicy,
-				VolumeBindingMode:    desired.VolumeBindingMode,
-				Parameters:           desired.Parameters,
-			}
-
-			if !reflect.DeepEqual(currentRelevant, desiredRelevant) {
-				sc.Annotations = desired.Annotations
-				sc.Labels = desired.Labels
-				sc.Provisioner = desired.Provisioner
-				sc.AllowVolumeExpansion = desired.AllowVolumeExpansion
-				sc.ReclaimPolicy = desired.ReclaimPolicy
-				sc.VolumeBindingMode = desired.VolumeBindingMode
-				sc.Parameters = desired.Parameters
-				return true
-			}
-			return false
-		})
+		changed, err := r.reconcileExistingStorageClass(ctx, current, desired)
 		if err != nil {
 			return false, fmt.Errorf("patch StorageClass %q: %w", scName, err)
 		}
@@ -743,10 +690,10 @@ func (r *FileSystemClaimReconciler) hasConditionWithReason(conds []metav1.Condit
 }
 
 // convert unstructured.Slice to metav1.Condition
-func asMetaConditions(sl []interface{}) []metav1.Condition {
+func asMetaConditions(sl []any) []metav1.Condition {
 	out := make([]metav1.Condition, 0, len(sl))
 	for _, it := range sl {
-		m, ok := it.(map[string]interface{})
+		m, ok := it.(map[string]any)
 		if !ok {
 			continue
 		}
@@ -1243,14 +1190,22 @@ func (r *FileSystemClaimReconciler) createResourceWithOwnership(
 	ctx context.Context,
 	fsc *fusionv1alpha1.FileSystemClaim,
 	obj *unstructured.Unstructured,
-	spec map[string]interface{},
+	spec map[string]any,
 ) error {
 	obj.SetNamespace(fsc.Namespace)
 	if err := controllerutil.SetOwnerReference(fsc, obj, r.Scheme); err != nil {
 		return fmt.Errorf("set ownerRef: %w", err)
 	}
+	// Stamp consistent ownership labels for reconciliation/watch filtering
+	labels := obj.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[FileSystemClaimOwnedByNameLabel] = fsc.Name
+	labels[FileSystemClaimOwnedByNamespaceLabel] = fsc.Namespace
+	obj.SetLabels(labels)
 	if obj.Object == nil {
-		obj.Object = map[string]interface{}{}
+		obj.Object = map[string]any{}
 	}
 	obj.Object["spec"] = spec
 	return r.Create(ctx, obj)
@@ -1295,20 +1250,20 @@ func (r *FileSystemClaimReconciler) handleValidationError(
 }
 
 // buildFilesystemSpec constructs the standard Filesystem spec structure
-func buildFilesystemSpec(ldNames []string) map[string]interface{} {
-	toIface := func(ss []string) []interface{} {
-		out := make([]interface{}, len(ss))
+func buildFilesystemSpec(ldNames []string) map[string]any {
+	toIface := func(ss []string) []any {
+		out := make([]any, len(ss))
 		for i, s := range ss {
 			out[i] = s
 		}
 		return out
 	}
 
-	return map[string]interface{}{
-		"local": map[string]interface{}{
+	return map[string]any{
+		"local": map[string]any{
 			"blockSize": "4M",
-			"pools": []interface{}{
-				map[string]interface{}{
+			"pools": []any{
+				map[string]any{
 					"name":  "system",
 					"disks": toIface(ldNames),
 				},
@@ -1316,13 +1271,74 @@ func buildFilesystemSpec(ldNames []string) map[string]interface{} {
 			"replication": "1-way",
 			"type":        "shared",
 		},
-		"seLinuxOptions": map[string]interface{}{
+		"seLinuxOptions": map[string]any{
 			"level": "s0",
 			"role":  "object_r",
 			"type":  "container_file_t",
 			"user":  "system_u",
 		},
 	}
+}
+
+func buildStorageClass(fsc *fusionv1alpha1.FileSystemClaim, scName, fsName string) *storagev1.StorageClass {
+	return &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: scName,
+			Annotations: map[string]string{
+				StorageClassDefaultAnnotation: "true",
+			},
+			Labels: map[string]string{
+				FileSystemClaimOwnedByNameLabel:      fsc.Name,
+				FileSystemClaimOwnedByNamespaceLabel: fsc.Namespace,
+			},
+		},
+		Provisioner:          "spectrumscale.csi.ibm.com",
+		AllowVolumeExpansion: ptr.To(true),
+		ReclaimPolicy:        ptr.To(corev1.PersistentVolumeReclaimDelete),
+		VolumeBindingMode:    ptr.To(storagev1.VolumeBindingImmediate),
+		Parameters: map[string]string{
+			"volBackendFs": fsName,
+		},
+	}
+}
+
+func storageClassRelevantFields(sc *storagev1.StorageClass) *storagev1.StorageClass {
+	return &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: sc.Annotations,
+			Labels:      sc.Labels,
+		},
+		Provisioner:          sc.Provisioner,
+		AllowVolumeExpansion: sc.AllowVolumeExpansion,
+		ReclaimPolicy:        sc.ReclaimPolicy,
+		VolumeBindingMode:    sc.VolumeBindingMode,
+		Parameters:           sc.Parameters,
+	}
+}
+
+func (r *FileSystemClaimReconciler) reconcileExistingStorageClass(
+	ctx context.Context,
+	current *storagev1.StorageClass,
+	desired *storagev1.StorageClass,
+) (bool, error) {
+	logger := log.FromContext(ctx)
+	return r.detectAndPatchDrift(ctx, current, func(obj client.Object) bool {
+		sc := obj.(*storagev1.StorageClass)
+		if reflect.DeepEqual(storageClassRelevantFields(sc), storageClassRelevantFields(desired)) {
+			return false
+		}
+
+		fields := storageClassRelevantFields(desired)
+		sc.Annotations = fields.Annotations
+		sc.Provisioner = fields.Provisioner
+		sc.AllowVolumeExpansion = fields.AllowVolumeExpansion
+		sc.ReclaimPolicy = fields.ReclaimPolicy
+		sc.VolumeBindingMode = fields.VolumeBindingMode
+		sc.Parameters = fields.Parameters
+		sc.Labels = fields.Labels
+		logger.Info("Detected StorageClass drift; patching to desired state", "name", sc.Name)
+		return true
+	})
 }
 
 // Helper functions -- END
@@ -1345,6 +1361,55 @@ func enqueueFSCByOwner() handler.EventHandler {
 			}
 		}
 		return nil
+	})
+}
+
+func didStorageClassChange() builder.WatchesOption {
+	return builder.WithPredicates(predicate.Funcs{
+		CreateFunc: func(_ event.CreateEvent) bool {
+			return false
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectNew == nil {
+				return false
+			}
+			labels := e.ObjectNew.GetLabels()
+			if labels == nil {
+				return false
+			}
+			return labels[FileSystemClaimOwnedByNameLabel] != "" && labels[FileSystemClaimOwnedByNamespaceLabel] != ""
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			if e.Object == nil {
+				return false
+			}
+			labels := e.Object.GetLabels()
+			if labels == nil {
+				return false
+			}
+			return labels[FileSystemClaimOwnedByNameLabel] != "" && labels[FileSystemClaimOwnedByNamespaceLabel] != ""
+		},
+		GenericFunc: func(_ event.GenericEvent) bool {
+			return false
+		},
+	})
+}
+
+func enqueueFSCByStorageClass() handler.EventHandler {
+	return handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
+		labels := obj.GetLabels()
+		name := labels[FileSystemClaimOwnedByNameLabel]
+		namespace := labels[FileSystemClaimOwnedByNamespaceLabel]
+		if name == "" || namespace == "" {
+			return nil
+		}
+
+		return []reconcile.Request{{
+			NamespacedName: types.NamespacedName{
+				Namespace: namespace,
+				Name:      name,
+			},
+		}}
 	})
 }
 
@@ -1388,9 +1453,7 @@ func didResourceStatusChange() builder.WatchesOption {
 			if !oldHas && !newHas {
 				return false
 			}
-			// if oldHas != newHas {
-			// 	return true
-			// }
+
 			if !newHas {
 				return false
 			}
@@ -1413,7 +1476,7 @@ func (r *FileSystemClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&fusionv1alpha1.FileSystemClaim{}, builder.OnlyMetadata, builder.WithPredicates(predicate.NewPredicateFuncs(isInTargetNamespace))).
 		Watches(
 			&unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": LocalDiskGroup + "/" + LocalDiskVersion,
 					"kind":       LocalDiskKind,
 				},
@@ -1423,13 +1486,18 @@ func (r *FileSystemClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		).
 		Watches(
 			&unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": FileSystemGroup + "/" + FileSystemVersion,
 					"kind":       FileSystemKind,
 				},
 			},
 			enqueueFSCByOwner(),
 			didResourceStatusChange(),
+		).
+		Watches(
+			&storagev1.StorageClass{},
+			enqueueFSCByStorageClass(),
+			didStorageClassChange(),
 		).
 		Named("filesystemclaim").
 		Complete(r)
