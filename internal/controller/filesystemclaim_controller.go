@@ -129,11 +129,15 @@ func (r *FileSystemClaimReconciler) Reconcile(
 
 	// Fetch the request
 	fsc := &fusionv1alpha1.FileSystemClaim{}
-	err := r.Get(ctx, req.NamespacedName, fsc)
-	if err != nil {
+
+	if err := r.Get(ctx, req.NamespacedName, fsc); errors.IsNotFound(err) {
+		logger.Info("FileSystemClaim not found, maybe deleted", "name", req.Name)
+		return ctrl.Result{}, nil
+	} else if err != nil {
 		logger.Error(err, "Failed to get FileSystemClaim", "name", req.Name)
 		return ctrl.Result{}, err
 	}
+
 	logger.Info("Reconciling FileSystemClaim", "name", fsc.Name, "namespace", fsc.Namespace)
 
 	// Finalizers first
@@ -204,6 +208,11 @@ func (r *FileSystemClaimReconciler) Reconcile(
 // handleFinalizers handles the finalizers for the FileSystemClaim
 func (r *FileSystemClaimReconciler) handleFinalizers(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
 	logger := log.FromContext(ctx)
+
+	// If the FileSystemClaim is being deleted, no need to add/remove finalizers
+	if fsc.DeletionTimestamp != nil {
+		return false, nil
+	}
 
 	if !controllerutil.ContainsFinalizer(fsc, FileSystemClaimFinalizer) {
 		if err := r.patchFSCSpec(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
@@ -1367,10 +1376,25 @@ func didResourceStatusChange() builder.WatchesOption {
 				return false
 			}
 
-			generationUnchanged := e.ObjectOld.GetGeneration() == e.ObjectNew.GetGeneration()
-			resourceVersionChanged := e.ObjectOld.GetResourceVersion() != e.ObjectNew.GetResourceVersion()
+			oldObj, okOld := e.ObjectOld.(*unstructured.Unstructured)
+			newObj, okNew := e.ObjectNew.(*unstructured.Unstructured)
+			if !okOld || !okNew {
+				return false
+			}
 
-			return generationUnchanged && resourceVersionChanged
+			oldStatus, oldHas := oldObj.Object["status"]
+			newStatus, newHas := newObj.Object["status"]
+
+			if !oldHas && !newHas {
+				return false
+			}
+			// if oldHas != newHas {
+			// 	return true
+			// }
+			if !newHas {
+				return false
+			}
+			return !reflect.DeepEqual(oldStatus, newStatus)
 		},
 		DeleteFunc: func(_ event.DeleteEvent) bool {
 			return false
@@ -1396,7 +1420,6 @@ func (r *FileSystemClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			},
 			enqueueFSCByOwner(),
 			didResourceStatusChange(),
-			builder.OnlyMetadata,
 		).
 		Watches(
 			&unstructured.Unstructured{
@@ -1407,7 +1430,6 @@ func (r *FileSystemClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			},
 			enqueueFSCByOwner(),
 			didResourceStatusChange(),
-			builder.OnlyMetadata,
 		).
 		Named("filesystemclaim").
 		Complete(r)
