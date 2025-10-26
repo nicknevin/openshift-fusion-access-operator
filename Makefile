@@ -40,12 +40,19 @@ BUNDLE_DEFAULT_CHANNEL := --default-channel=$(DEFAULT_CHANNEL)
 endif
 BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL) $(USE_IMAGE_DIGESTS)
 
+#
+REGISTRY ?= quay.io/openshift-storage-scale
+
+#
+CHANNEL ?= alpha
+
+#
 # IMAGE_TAG_BASE defines the docker.io namespace and part of the image name for remote images.
 # This variable is used to construct full image tags for bundle and catalog images.
 #
 # For example, running 'make bundle-build bundle-push catalog-build catalog-push' will build and push both
 # fusion.storage.openshift.io/openshift-fusion-access-operator-bundle:$VERSION and fusion.storage.openshift.io/openshift-fusion-access-operator-catalog:$VERSION.
-IMAGE_TAG_BASE ?= quay.io/openshift-storage-scale/openshift-fusion-access
+IMAGE_TAG_BASE ?= $(REGISTRY)/openshift-fusion-access
 
 
 # always release the console with the same tag as the operator and the other way around!
@@ -207,8 +214,8 @@ run: manifests generate fmt vet ## Run a controller from your host.
 
 .PHONY: clean
 clean: ## Remove build artifacts
-	rm -rf ./bundle ./manager ./cover.out ./coverage.html
-	rm -f ./config/samples/fusionaccess-catalog-*.yaml
+	rm -rf ./bundle
+	rm -f ./cover.out ./coverage.html ./config/samples/fusionaccess-catalog-*.yaml catalog-template.yaml
 
 .PHONY: clobber
 clobber: clean ## Remove build artifacts and downloaded tools
@@ -469,3 +476,28 @@ fetchyaml: ## Fetches install yaml files
 .PHONY: tool-versions
 tool-versions: opm
 	$(OPM) version
+
+release: manifests generate docker-build docker-push console-build console-push devicefinder-docker-build devicefinder-docker-push \
+           bundle bundle-build bundle-push
+
+fbc:
+	rm -rf catalog catalog.Dockerfile
+	mkdir -p catalog/openshift-fusion-access-operator
+	opm version
+	opm generate dockerfile catalog
+	$(eval DIGEST := $(shell skopeo inspect docker://${REGISTRY}/openshift-fusion-access-bundle:${VERSION} | jq -r .Digest))
+	test -n "${DIGEST}"
+	sed -e "s/DIGEST/$(DIGEST)/" -e "s/CHANNEL/$(CHANNEL)/" -e "s#REGISTRY#$(REGISTRY)#" catalog-templates/${VERSION}.yaml > catalog-template.yaml
+	opm alpha render-template basic catalog-template.yaml -o yaml > catalog/catalog.yaml
+	opm validate catalog
+	podman build . -f catalog.Dockerfile -t openshift-fusion-access-catalog:latest
+	podman tag openshift-fusion-access-catalog:latest ${REGISTRY}/openshift-fusion-access-catalog:latest
+
+fbc-push:
+	podman tag openshift-fusion-access-catalog:latest ${REGISTRY}/openshift-fusion-access-catalog:${CHANNEL}
+	podman push ${REGISTRY}/openshift-fusion-access-catalog:${CHANNEL}
+
+fbc-graph:
+	echo '```mermaid' > update-graph.md
+	opm alpha render-graph catalog >> update-graph.md
+	echo '```' >> update-graph.md
