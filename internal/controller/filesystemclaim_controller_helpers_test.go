@@ -17,12 +17,19 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	fusionv1alpha1 "github.com/openshift-storage-scale/openshift-fusion-access-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestFileSystemClaimHelpers(t *testing.T) {
@@ -115,7 +122,7 @@ var _ = Describe("FileSystemClaim Helper Functions", func() {
 				spec := buildFilesystemSpec(ldNames)
 
 				Expect(spec).To(HaveKey("local"))
-				local := spec["local"].(map[string]interface{})
+				local := spec["local"].(map[string]any)
 
 				Expect(local).To(HaveKey("blockSize"))
 				Expect(local["blockSize"]).To(Equal("4M"))
@@ -127,12 +134,12 @@ var _ = Describe("FileSystemClaim Helper Functions", func() {
 				Expect(local["type"]).To(Equal("shared"))
 
 				Expect(local).To(HaveKey("pools"))
-				pools := local["pools"].([]interface{})
+				pools := local["pools"].([]any)
 				Expect(pools).To(HaveLen(1))
 
-				pool := pools[0].(map[string]interface{})
+				pool := pools[0].(map[string]any)
 				Expect(pool["name"]).To(Equal("system"))
-				Expect(pool["disks"]).To(Equal([]interface{}{"nvme1n1-test-wwn-123"}))
+				Expect(pool["disks"]).To(Equal([]any{"nvme1n1-test-wwn-123"}))
 			})
 
 			It("should build correct spec for multiple disks", func() {
@@ -140,11 +147,11 @@ var _ = Describe("FileSystemClaim Helper Functions", func() {
 
 				spec := buildFilesystemSpec(ldNames)
 
-				local := spec["local"].(map[string]interface{})
-				pools := local["pools"].([]interface{})
-				pool := pools[0].(map[string]interface{})
+				local := spec["local"].(map[string]any)
+				pools := local["pools"].([]any)
+				pool := pools[0].(map[string]any)
 
-				expectedDisks := []interface{}{"nvme1n1-wwn1", "nvme1n2-wwn2", "sda-wwn3"}
+				expectedDisks := []any{"nvme1n1-wwn1", "nvme1n2-wwn2", "sda-wwn3"}
 				Expect(pool["disks"]).To(Equal(expectedDisks))
 			})
 
@@ -154,7 +161,7 @@ var _ = Describe("FileSystemClaim Helper Functions", func() {
 				spec := buildFilesystemSpec(ldNames)
 
 				Expect(spec).To(HaveKey("seLinuxOptions"))
-				seLinux := spec["seLinuxOptions"].(map[string]interface{})
+				seLinux := spec["seLinuxOptions"].(map[string]any)
 
 				Expect(seLinux["level"]).To(Equal("s0"))
 				Expect(seLinux["role"]).To(Equal("object_r"))
@@ -167,15 +174,15 @@ var _ = Describe("FileSystemClaim Helper Functions", func() {
 	Describe("asMetaConditions", func() {
 		Context("with valid condition data", func() {
 			It("should convert unstructured conditions to metav1.Condition", func() {
-				conditions := []interface{}{
-					map[string]interface{}{
+				conditions := []any{
+					map[string]any{
 						"type":               "Ready",
 						"status":             "True",
 						"reason":             "TestReason",
 						"message":            "Test message",
 						"lastTransitionTime": "2023-01-01T00:00:00Z",
 					},
-					map[string]interface{}{
+					map[string]any{
 						"type":               "Available",
 						"status":             "False",
 						"reason":             "TestReason2",
@@ -200,18 +207,18 @@ var _ = Describe("FileSystemClaim Helper Functions", func() {
 			})
 
 			It("should handle empty conditions", func() {
-				result := asMetaConditions([]interface{}{})
-				Expect(result).To(HaveLen(0))
+				result := asMetaConditions([]any{})
+				Expect(result).To(BeEmpty())
 			})
 
 			It("should skip invalid condition entries", func() {
-				conditions := []interface{}{
-					map[string]interface{}{
+				conditions := []any{
+					map[string]any{
 						"type":   "Valid",
 						"status": "True",
 					},
 					"invalid-string",
-					map[string]interface{}{
+					map[string]any{
 						"type":   "AnotherValid",
 						"status": "False",
 					},
@@ -275,6 +282,336 @@ var _ = Describe("FileSystemClaim Helper Functions", func() {
 
 				result := isOwnedByThisFSC(obj, "test-fsc")
 				Expect(result).To(BeFalse())
+			})
+		})
+	})
+
+	Describe("hasConditionWithReason", func() {
+		var reconciler *FileSystemClaimReconciler
+
+		BeforeEach(func() {
+			reconciler = &FileSystemClaimReconciler{}
+		})
+
+		Context("when checking for condition with specific reason", func() {
+			It("should return true when condition exists with matching reason", func() {
+				conditions := []metav1.Condition{
+					{
+						Type:   "DeletionBlocked",
+						Status: metav1.ConditionTrue,
+						Reason: "StorageClassInUse",
+					},
+				}
+
+				result := reconciler.hasConditionWithReason(conditions, "DeletionBlocked", "StorageClassInUse")
+				Expect(result).To(BeTrue())
+			})
+
+			It("should return false when condition exists with different reason", func() {
+				conditions := []metav1.Condition{
+					{
+						Type:   "DeletionBlocked",
+						Status: metav1.ConditionTrue,
+						Reason: "StorageClassInUse",
+					},
+				}
+
+				result := reconciler.hasConditionWithReason(conditions, "DeletionBlocked", "FileSystemLabelNotPresent")
+				Expect(result).To(BeFalse())
+			})
+
+			It("should return false when condition does not exist", func() {
+				conditions := []metav1.Condition{}
+
+				result := reconciler.hasConditionWithReason(conditions, "DeletionBlocked", "StorageClassInUse")
+				Expect(result).To(BeFalse())
+			})
+		})
+	})
+
+	Describe("getRandomStorageNode", func() {
+		var ctx context.Context
+
+		BeforeEach(func() {
+			ctx = context.Background()
+		})
+
+		It("should select a node with both worker and storage labels", func() {
+			// Create nodes
+			node1 := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "storage-node-1",
+					Labels: map[string]string{
+						WorkerNodeRoleLabel:   "",
+						ScaleStorageRoleLabel: ScaleStorageRoleValue,
+					},
+				},
+			}
+
+			node2 := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "worker-only",
+					Labels: map[string]string{
+						WorkerNodeRoleLabel: "", // No storage label
+					},
+				},
+			}
+
+			scheme := runtime.NewScheme()
+			Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(node1, node2).
+				Build()
+
+			reconciler := &FileSystemClaimReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			nodeName, err := reconciler.getRandomStorageNode(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(nodeName).To(Equal("storage-node-1"))
+		})
+
+		It("should return error when no storage nodes found", func() {
+			// Create node without storage label
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "worker-only",
+					Labels: map[string]string{
+						WorkerNodeRoleLabel: "",
+					},
+				},
+			}
+
+			scheme := runtime.NewScheme()
+			Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(node).
+				Build()
+
+			reconciler := &FileSystemClaimReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			nodeName, err := reconciler.getRandomStorageNode(ctx)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("no nodes found"))
+			Expect(nodeName).To(BeEmpty())
+		})
+	})
+
+	Describe("getDeviceWWN", func() {
+		var ctx context.Context
+
+		BeforeEach(func() {
+			ctx = context.Background()
+		})
+
+		It("should return WWN for device on specified node", func() {
+			operatorNS := "test-operator"
+			GinkgoT().Setenv("DEPLOYMENT_NAMESPACE", operatorNS)
+
+			lvdr := &fusionv1alpha1.LocalVolumeDiscoveryResult{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "discovery-result-node1",
+					Namespace: operatorNS,
+				},
+				Spec: fusionv1alpha1.LocalVolumeDiscoveryResultSpec{
+					NodeName: "node1",
+				},
+				Status: fusionv1alpha1.LocalVolumeDiscoveryResultStatus{
+					DiscoveredDevices: []fusionv1alpha1.DiscoveredDevice{
+						{
+							Path: "/dev/nvme0n1",
+							WWN:  "uuid.12345678-abcd-1234-abcd-123456789abc",
+						},
+					},
+				},
+			}
+
+			scheme := runtime.NewScheme()
+			Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
+			Expect(fusionv1alpha1.AddToScheme(scheme)).To(Succeed())
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(lvdr).
+				Build()
+
+			reconciler := &FileSystemClaimReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			wwn, err := reconciler.getDeviceWWN(ctx, "/dev/nvme0n1", "node1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(wwn).To(Equal("uuid.12345678-abcd-1234-abcd-123456789abc"))
+		})
+
+		It("should return error when device not found in LVDR", func() {
+			operatorNS := "test-operator"
+			GinkgoT().Setenv("DEPLOYMENT_NAMESPACE", operatorNS)
+
+			lvdr := &fusionv1alpha1.LocalVolumeDiscoveryResult{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "discovery-result-node1",
+					Namespace: operatorNS,
+				},
+				Spec: fusionv1alpha1.LocalVolumeDiscoveryResultSpec{
+					NodeName: "node1",
+				},
+				Status: fusionv1alpha1.LocalVolumeDiscoveryResultStatus{
+					DiscoveredDevices: []fusionv1alpha1.DiscoveredDevice{
+						{
+							Path: "/dev/sda",
+							WWN:  "uuid.different",
+						},
+					},
+				},
+			}
+
+			scheme := runtime.NewScheme()
+			Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
+			Expect(fusionv1alpha1.AddToScheme(scheme)).To(Succeed())
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(lvdr).
+				Build()
+
+			reconciler := &FileSystemClaimReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			wwn, err := reconciler.getDeviceWWN(ctx, "/dev/nvme0n1", "node1")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("not found"))
+			Expect(wwn).To(BeEmpty())
+		})
+
+		It("should return error when WWN is empty", func() {
+			operatorNS := "test-operator"
+			GinkgoT().Setenv("DEPLOYMENT_NAMESPACE", operatorNS)
+
+			lvdr := &fusionv1alpha1.LocalVolumeDiscoveryResult{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "discovery-result-node1",
+					Namespace: operatorNS,
+				},
+				Status: fusionv1alpha1.LocalVolumeDiscoveryResultStatus{
+					DiscoveredDevices: []fusionv1alpha1.DiscoveredDevice{
+						{
+							Path: "/dev/nvme0n1",
+							WWN:  "", // Empty WWN
+						},
+					},
+				},
+			}
+
+			scheme := runtime.NewScheme()
+			Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
+			Expect(fusionv1alpha1.AddToScheme(scheme)).To(Succeed())
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(lvdr).
+				Build()
+
+			reconciler := &FileSystemClaimReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			wwn, err := reconciler.getDeviceWWN(ctx, "/dev/nvme0n1", "node1")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("WWN is empty"))
+			Expect(wwn).To(BeEmpty())
+		})
+	})
+
+	Describe("calculateDeletionBackoff", func() {
+		var reconciler *FileSystemClaimReconciler
+		var fsc *fusionv1alpha1.FileSystemClaim
+
+		BeforeEach(func() {
+			reconciler = &FileSystemClaimReconciler{}
+			fsc = &fusionv1alpha1.FileSystemClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-fsc",
+					Namespace: "test-ns",
+				},
+			}
+		})
+
+		Context("when calculating backoff duration", func() {
+			It("should return initial delay when condition does not exist", func() {
+				fsc.Status.Conditions = []metav1.Condition{}
+
+				duration := reconciler.calculateDeletionBackoff(fsc, "StorageClassInUse")
+				Expect(duration).To(Equal(30 * time.Second))
+			})
+
+			It("should return initial delay when reason does not match", func() {
+				fsc.Status.Conditions = []metav1.Condition{
+					{
+						Type:               "DeletionBlocked",
+						Status:             metav1.ConditionTrue,
+						Reason:             "FileSystemLabelNotPresent",
+						LastTransitionTime: metav1.Now(),
+					},
+				}
+
+				duration := reconciler.calculateDeletionBackoff(fsc, "StorageClassInUse")
+				Expect(duration).To(Equal(30 * time.Second))
+			})
+
+			It("should return 1 minute after 30 seconds elapsed", func() {
+				fsc.Status.Conditions = []metav1.Condition{
+					{
+						Type:               "DeletionBlocked",
+						Status:             metav1.ConditionTrue,
+						Reason:             "StorageClassInUse",
+						LastTransitionTime: metav1.Time{Time: time.Now().Add(-40 * time.Second)},
+					},
+				}
+
+				duration := reconciler.calculateDeletionBackoff(fsc, "StorageClassInUse")
+				Expect(duration).To(Equal(1 * time.Minute))
+			})
+
+			It("should return 2 minutes after 2 minutes elapsed", func() {
+				fsc.Status.Conditions = []metav1.Condition{
+					{
+						Type:               "DeletionBlocked",
+						Status:             metav1.ConditionTrue,
+						Reason:             "StorageClassInUse",
+						LastTransitionTime: metav1.Time{Time: time.Now().Add(-2 * time.Minute)},
+					},
+				}
+
+				duration := reconciler.calculateDeletionBackoff(fsc, "StorageClassInUse")
+				Expect(duration).To(Equal(2 * time.Minute))
+			})
+
+			It("should cap at 10 minutes for long elapsed time", func() {
+				fsc.Status.Conditions = []metav1.Condition{
+					{
+						Type:               "DeletionBlocked",
+						Status:             metav1.ConditionTrue,
+						Reason:             "StorageClassInUse",
+						LastTransitionTime: metav1.Time{Time: time.Now().Add(-1 * time.Hour)},
+					},
+				}
+
+				duration := reconciler.calculateDeletionBackoff(fsc, "StorageClassInUse")
+				Expect(duration).To(Equal(10 * time.Minute))
 			})
 		})
 	})

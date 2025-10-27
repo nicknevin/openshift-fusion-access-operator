@@ -145,8 +145,8 @@ func BenchmarkReconcile0ms(b *testing.B) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 
-	corev1.AddToScheme(scheme)
-	fusionv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = fusionv1alpha1.AddToScheme(scheme)
 
 	fsc := &fusionv1alpha1.FileSystemClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -191,8 +191,8 @@ func BenchmarkReconcile100ms(b *testing.B) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 
-	corev1.AddToScheme(scheme)
-	fusionv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = fusionv1alpha1.AddToScheme(scheme)
 
 	fsc := &fusionv1alpha1.FileSystemClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -237,8 +237,8 @@ func BenchmarkReconcileWithTimeouts(b *testing.B) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 
-	corev1.AddToScheme(scheme)
-	fusionv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = fusionv1alpha1.AddToScheme(scheme)
 
 	fsc := &fusionv1alpha1.FileSystemClaim{
 		ObjectMeta: metav1.ObjectMeta{
