@@ -41,6 +41,7 @@ import (
 	imageregistryv1 "github.com/openshift/api/imageregistry/v1"
 	operatorv1 "github.com/openshift/api/operator/v1"
 
+	fsccontroller "github.com/openshift-storage-scale/openshift-fusion-access-operator/internal/controller/filesystemclaim"
 	lvdcontroller "github.com/openshift-storage-scale/openshift-fusion-access-operator/internal/controller/localvolumediscovery"
 
 	fusionv1alpha "github.com/openshift-storage-scale/openshift-fusion-access-operator/api/v1alpha1"
@@ -155,7 +156,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	if err = (&controller.FileSystemClaimReconciler{
+	if err = (&fsccontroller.FileSystemClaimReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {

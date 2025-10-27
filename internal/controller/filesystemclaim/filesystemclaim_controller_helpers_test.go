@@ -14,11 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package filesystemclaim
 
 import (
 	"context"
-	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -31,11 +30,6 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
-
-func TestFileSystemClaimHelpers(t *testing.T) {
-	RegisterFailHandler(Fail)
-	// This test is part of the main Controller Suite, no need for separate RunSpecs
-}
 
 var _ = Describe("FileSystemClaim Helper Functions", func() {
 
