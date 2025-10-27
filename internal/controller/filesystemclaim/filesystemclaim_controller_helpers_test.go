@@ -18,6 +18,7 @@ package filesystemclaim
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -34,53 +35,61 @@ import (
 var _ = Describe("FileSystemClaim Helper Functions", func() {
 
 	Describe("generateLocalDiskName", func() {
-		Context("with valid device paths and WWNs", func() {
-			It("should generate correct names for nvme devices", func() {
-				devicePath := "/dev/nvme1n1"
+		Context("with valid WWNs", func() {
+			It("should use raw WWN with uuid prefix", func() {
 				wwn := "uuid.f18cb32d-1087-55a1-b9bc-4b4d12bcdbf4"
 
-				result, err := generateLocalDiskName(devicePath, wwn)
+				result, err := generateLocalDiskName(wwn)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(result).To(Equal("nvme1n1-f18cb32d-1087-55a1-b9bc-4b4d12bcdbf4"))
+				Expect(result).To(Equal("uuid.f18cb32d-1087-55a1-b9bc-4b4d12bcdbf4"))
 			})
 
-			It("should handle WWN with 0x prefix", func() {
-				devicePath := "/dev/nvme1n1"
+			It("should use raw WWN with 0x prefix", func() {
 				wwn := "0x5002538e00000001"
 
-				result, err := generateLocalDiskName(devicePath, wwn)
+				result, err := generateLocalDiskName(wwn)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(result).To(Equal("nvme1n1-5002538e00000001"))
+				Expect(result).To(Equal("0x5002538e00000001"))
 			})
 
-			It("should handle WWN with uuid. prefix", func() {
-				devicePath := "/dev/nvme1n1"
-				wwn := "uuid.test-wwn-123"
+			It("should use raw WWN with eui prefix", func() {
+				wwn := "eui.517c5704-d89f-5bb2-bf11-9ce58152118a"
 
-				result, err := generateLocalDiskName(devicePath, wwn)
+				result, err := generateLocalDiskName(wwn)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(result).To(Equal("nvme1n1-test-wwn-123"))
+				Expect(result).To(Equal("eui.517c5704-d89f-5bb2-bf11-9ce58152118a"))
 			})
 
-			It("should handle sda devices", func() {
-				devicePath := "/dev/sda"
+			It("should use raw WWN without prefix", func() {
 				wwn := "uuid.sda-wwn-456"
 
-				result, err := generateLocalDiskName(devicePath, wwn)
+				result, err := generateLocalDiskName(wwn)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(result).To(Equal("sda-sda-wwn-456"))
+				Expect(result).To(Equal("uuid.sda-wwn-456"))
+			})
+
+			It("should handle WWN without standard prefix", func() {
+				wwn := "simple-wwn-without-prefix"
+
+				result, err := generateLocalDiskName(wwn)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(Equal("simple-wwn-without-prefix"))
 			})
 		})
 
 		Context("with invalid inputs", func() {
-			It("should return error for empty device path", func() {
-				_, err := generateLocalDiskName("", "uuid.test")
+			It("should return error for empty WWN", func() {
+				_, err := generateLocalDiskName("")
 				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("WWN cannot be empty"))
 			})
 
-			It("should return error for empty WWN", func() {
-				_, err := generateLocalDiskName("/dev/nvme1n1", "")
+			It("should return error for WWN that's too long", func() {
+				// Create a WWN longer than 253 characters
+				longWWN := "uuid." + strings.Repeat("a", 250)
+				_, err := generateLocalDiskName(longWWN)
 				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("too long"))
 			})
 		})
 	})
@@ -111,7 +120,7 @@ var _ = Describe("FileSystemClaim Helper Functions", func() {
 	Describe("buildFilesystemSpec", func() {
 		Context("with valid disk names", func() {
 			It("should build correct spec for single disk", func() {
-				ldNames := []string{"nvme1n1-test-wwn-123"}
+				ldNames := []string{"uuid.test-wwn-123"}
 
 				spec := buildFilesystemSpec(ldNames)
 
@@ -133,11 +142,11 @@ var _ = Describe("FileSystemClaim Helper Functions", func() {
 
 				pool := pools[0].(map[string]any)
 				Expect(pool["name"]).To(Equal("system"))
-				Expect(pool["disks"]).To(Equal([]any{"nvme1n1-test-wwn-123"}))
+				Expect(pool["disks"]).To(Equal([]any{"uuid.test-wwn-123"}))
 			})
 
 			It("should build correct spec for multiple disks", func() {
-				ldNames := []string{"nvme1n1-wwn1", "nvme1n2-wwn2", "sda-wwn3"}
+				ldNames := []string{"uuid.wwn1", "eui.wwn2", "0xwwn3"}
 
 				spec := buildFilesystemSpec(ldNames)
 
@@ -145,12 +154,12 @@ var _ = Describe("FileSystemClaim Helper Functions", func() {
 				pools := local["pools"].([]any)
 				pool := pools[0].(map[string]any)
 
-				expectedDisks := []any{"nvme1n1-wwn1", "nvme1n2-wwn2", "sda-wwn3"}
+				expectedDisks := []any{"uuid.wwn1", "eui.wwn2", "0xwwn3"}
 				Expect(pool["disks"]).To(Equal(expectedDisks))
 			})
 
 			It("should include seLinuxOptions", func() {
-				ldNames := []string{"nvme1n1-test-wwn-123"}
+				ldNames := []string{"uuid.test-wwn-123"}
 
 				spec := buildFilesystemSpec(ldNames)
 

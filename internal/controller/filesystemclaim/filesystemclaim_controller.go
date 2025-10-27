@@ -21,7 +21,6 @@ import (
 	cryptorand "crypto/rand"
 	"fmt"
 	"math/big"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -356,10 +355,10 @@ func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *f
 			return true, nil
 		}
 
-		// Generate LocalDisk name using device name + WWN
-		localDiskName, err := generateLocalDiskName(devicePath, wwn)
+		// Generate LocalDisk name from WWN
+		localDiskName, err := generateLocalDiskName(wwn)
 		if err != nil {
-			logger.Error(err, "failed to generate LocalDisk name", "device", devicePath, "wwn", wwn)
+			logger.Error(err, "failed to generate LocalDisk name", "wwn", wwn)
 			if e := r.handleResourceCreationError(ctx, fsc, "LocalDisk", err); e != nil {
 				return false, e
 			}
@@ -1027,36 +1026,25 @@ func (r *FileSystemClaimReconciler) getDeviceWWN(
 	return "", fmt.Errorf("device %s not found in LocalVolumeDiscoveryResult for node %s", devicePath, nodeName)
 }
 
-// generateLocalDiskName generates a LocalDisk name from device path and WWN
-func generateLocalDiskName(devicePath, wwn string) (string, error) {
-	// Extract device name from path (e.g., /dev/nvme1n1 -> nvme1n1)
-	deviceName := filepath.Base(devicePath)
-	if deviceName == "" || deviceName == "." {
-		return "", fmt.Errorf("invalid device path: %s", devicePath)
+// generateLocalDiskName generates a LocalDisk name from WWN
+// Uses the raw WWN directly to match v1.0 naming convention
+func generateLocalDiskName(wwn string) (string, error) {
+	// Validate WWN is not empty
+	if wwn == "" {
+		return "", fmt.Errorf("WWN cannot be empty")
 	}
-
-	// Clean WWN - remove common prefixes to make it Kubernetes-compatible
-	cleanWWN := wwn
-	if strings.HasPrefix(wwn, "uuid.") {
-		cleanWWN = strings.TrimPrefix(wwn, "uuid.")
-	} else if strings.HasPrefix(wwn, "0x") {
-		cleanWWN = strings.TrimPrefix(wwn, "0x")
-	}
-
-	// Combine device name with cleaned WWN
-	name := fmt.Sprintf("%s-%s", deviceName, cleanWWN)
 
 	// Validate Kubernetes resource name constraints
-	if len(name) > maxKubernetesNameLength {
-		return "", fmt.Errorf("generated name too long: %s (max 253 chars)", name)
+	if len(wwn) > maxKubernetesNameLength {
+		return "", fmt.Errorf("WWN too long for Kubernetes resource name: %s (max %d chars)", wwn, maxKubernetesNameLength)
 	}
 
 	// Basic validation for Kubernetes resource names
-	if !isValidKubernetesName(name) {
-		return "", fmt.Errorf("generated name is not a valid Kubernetes resource name: %s", name)
+	if !isValidKubernetesName(wwn) {
+		return "", fmt.Errorf("WWN is not a valid Kubernetes resource name: %s", wwn)
 	}
 
-	return name, nil
+	return wwn, nil
 }
 
 // isValidKubernetesName checks if a string is a valid Kubernetes resource name

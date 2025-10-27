@@ -1106,10 +1106,9 @@ var _ = Describe("FileSystemClaim Creation Flow", func() {
 			Expect(fakeClient.List(ctx, ldList, client.InNamespace(fsc.Namespace))).To(Succeed())
 			Expect(ldList.Items).To(HaveLen(1))
 
-			// Verify name format: nvme0n1-<uuid>
+			// Verify name format: raw WWN (e.g., uuid.12345678-...)
 			ldName := ldList.Items[0].GetName()
-			Expect(ldName).To(ContainSubstring("nvme0n1"))
-			Expect(ldName).To(ContainSubstring("12345678"))
+			Expect(ldName).To(Equal("uuid.12345678-1234-1234-1234-123456789abc"))
 
 			// Verify condition set to InProgress
 			updated := &fusionv1alpha1.FileSystemClaim{}
@@ -1174,14 +1173,14 @@ var _ = Describe("FileSystemClaim Creation Flow", func() {
 				},
 			}
 
-			// Pre-create LocalDisk (already exists)
+			// Pre-create LocalDisk (already exists) with raw WWN name
 			ld := &unstructured.Unstructured{}
 			ld.SetGroupVersionKind(schema.GroupVersionKind{
 				Group:   LocalDiskGroup,
 				Version: LocalDiskVersion,
 				Kind:    LocalDiskKind,
 			})
-			ld.SetName("nvme0n1-12345678-1234-1234-1234-123456789abc")
+			ld.SetName("uuid.12345678-1234-1234-1234-123456789abc")
 			ld.SetNamespace(fsc.Namespace)
 			ld.SetOwnerReferences([]metav1.OwnerReference{
 				{
@@ -1413,10 +1412,10 @@ var _ = Describe("FileSystemClaim Creation Flow", func() {
 			Expect(fakeClient.List(ctx, ldList, client.InNamespace(fsc.Namespace))).To(Succeed())
 			Expect(ldList.Items).To(HaveLen(2))
 
-			// Verify both devices are represented
+			// Verify both devices are represented by their WWN names
 			names := []string{ldList.Items[0].GetName(), ldList.Items[1].GetName()}
-			Expect(names).To(ContainElement(ContainSubstring("nvme0n1")))
-			Expect(names).To(ContainElement(ContainSubstring("nvme1n1")))
+			Expect(names).To(ContainElement("uuid.aaaa-1111-2222-3333-bbbbbbbbbbbb"))
+			Expect(names).To(ContainElement("uuid.cccc-4444-5555-6666-dddddddddddd"))
 		})
 
 		It("should be idempotent when condition is already set correctly", func() {
