@@ -79,15 +79,25 @@ const (
 	ReasonDeviceValidationFailed    = "DeviceValidationFailed"
 	ReasonDeviceValidationSucceeded = "DeviceValidationSucceeded"
 
+	// DELETION CONDITION
+	ConditionTypeDeletionBlocked    = "DeletionBlocked"
+	ReasonStorageClassInUse         = "StorageClassInUse"
+	ReasonFileSystemLabelNotPresent = "FileSystemLabelNotPresent"
+
+	ReasonStorageClassDeleted = "StorageClassDeleted"
+	ReasonFilesystemDeleted   = "FilesystemDeleted"
+	ReasonLocalDiskDeleted    = "LocalDiskDeleted"
+
 	// OVERALL STATUS CONDITIONS
 	ConditionTypeReady           = "Ready"
 	ReasonProvisioningFailed     = "ProvisioningFailed"
 	ReasonProvisioningSucceeded  = "ProvisioningSucceeded"
 	ReasonProvisioningInProgress = "ProvisioningInProgress"
 
-	ReasonValidationFailed = "ValidationFailed"
-	ReasonDeviceNotFound   = "DeviceNotFound"
-	ReasonDeviceInUse      = "DeviceInUse"
+	ReasonValidationFailed  = "ValidationFailed"
+	ReasonDeviceNotFound    = "DeviceNotFound"
+	ReasonDeviceInUse       = "DeviceInUse"
+	ReasonDeletionRequested = "DeletionRequested"
 
 	// IBM Spectrum Scale resource information
 	LocalDiskGroup   = "scale.spectrum.ibm.com"
@@ -109,6 +119,7 @@ const (
 	FileSystemClaimOwnedByNameLabel      = "fusion.storage.openshift.io/owned-by-fsc-name"
 	FileSystemClaimOwnedByNamespaceLabel = "fusion.storage.openshift.io/owned-by-fsc-namespace"
 	StorageClassDefaultAnnotation        = "storageclass.kubevirt.io/is-default-virt-class"
+	FileSystemDeletionLabel              = "scale.spectrum.ibm.com/allowDelete"
 )
 
 // FileSystemClaimReconciler reconciles a FileSystemClaim object
@@ -126,6 +137,7 @@ type FileSystemClaimReconciler struct {
 // +kubebuilder:rbac:groups=scale.spectrum.ibm.com,resources=localdisks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=scale.spectrum.ibm.com,resources=filesystems,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
 
 func (r *FileSystemClaimReconciler) Reconcile(
 	ctx context.Context,
@@ -137,7 +149,8 @@ func (r *FileSystemClaimReconciler) Reconcile(
 	fsc := &fusionv1alpha1.FileSystemClaim{}
 
 	if err := r.Get(ctx, req.NamespacedName, fsc); errors.IsNotFound(err) {
-		logger.Info("FileSystemClaim not found, maybe deleted", "name", req.Name)
+		// This is normal - object might have been deleted or not yet in cache
+		logger.V(1).Info("FileSystemClaim not found, likely deleted or cache lag", "name", req.Name)
 		return ctrl.Result{}, nil
 	} else if err != nil {
 		logger.Error(err, "Failed to get FileSystemClaim", "name", req.Name)
@@ -155,8 +168,11 @@ func (r *FileSystemClaimReconciler) Reconcile(
 	}
 
 	// Handle deletion
-	if changed, err := r.handleDeletion(ctx, fsc); err != nil {
+	if requeueAfter, changed, err := r.handleDeletion(ctx, fsc); err != nil {
 		return ctrl.Result{}, err
+	} else if requeueAfter > 0 {
+		// Deletion is blocked, retry with exponential backoff
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	} else if changed {
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
@@ -233,27 +249,53 @@ func (r *FileSystemClaimReconciler) handleFinalizers(ctx context.Context, fsc *f
 	return false, nil
 }
 
-// TODO handleDeletion handles the deletion of FileSystemClaim and cleans up resources
-func (r *FileSystemClaimReconciler) handleDeletion(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
+// handleDeletion handles the deletion of FileSystemClaim and cleans up resources
+// Returns: (requeueAfter time.Duration, changed bool, err error)
+// - requeueAfter > 0: deletion is blocked, requeue with exponential backoff
+// - changed = true: status was updated, requeue normally
+// - err != nil: error occurred
+func (r *FileSystemClaimReconciler) handleDeletion(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (time.Duration, bool, error) {
 	logger := log.FromContext(ctx)
 
+	// Nothing to Delete
 	if fsc.DeletionTimestamp == nil {
-		return false, nil
+		return 0, false, nil
 	}
 
-	if controllerutil.ContainsFinalizer(fsc, FileSystemClaimFinalizer) {
-		logger.Info("Cleanup logic placeholder - would delete LocalDisk, FileSystem, and StorageClass")
-
-		if err := r.patchFSCSpec(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
-			controllerutil.RemoveFinalizer(cur, FileSystemClaimFinalizer)
-		}); err != nil {
-			logger.Error(err, "Failed to remove finalizer")
-			return false, err
-		}
-		logger.Info("Removed finalizer", "name", fsc.Name)
-		return true, nil
+	// Deletiontimestamp is set, so we need to cleanup
+	if !controllerutil.ContainsFinalizer(fsc, FileSystemClaimFinalizer) {
+		return 0, false, nil
 	}
-	return false, nil
+
+	logger.Info("Handling deletion of FileSystemClaim", "name", fsc.Name)
+
+	// Mark FSC as deletion requested
+	if changed, err := r.markDeletionRequested(ctx, fsc); changed || err != nil {
+		return 0, changed, err
+	}
+
+	// Check for blocking conditions
+	if requeueAfter, changed, err := r.checkStorageClassUsage(ctx, fsc); requeueAfter > 0 || changed || err != nil {
+		return requeueAfter, changed, err
+	}
+	if requeueAfter, changed, err := r.checkFilesystemDeletionLabel(ctx, fsc); requeueAfter > 0 || changed || err != nil {
+		return requeueAfter, changed, err
+	}
+
+	// Delete resources in order: SC -> FS -> LD
+	if changed, err := r.deleteStorageClass(ctx, fsc); changed || err != nil {
+		return 0, changed, err
+	}
+	if requeueAfter, changed, err := r.deleteFilesystem(ctx, fsc); requeueAfter > 0 || changed || err != nil {
+		return requeueAfter, changed, err
+	}
+	if requeueAfter, changed, err := r.deleteLocalDisks(ctx, fsc); requeueAfter > 0 || changed || err != nil {
+		return requeueAfter, changed, err
+	}
+
+	// All resources deleted, remove finalizer
+	changed, err := r.removeFinalizer(ctx, fsc)
+	return 0, changed, err
 }
 
 // ensureLocalDisk creates LocalDisk/s
@@ -687,6 +729,50 @@ func (r *FileSystemClaimReconciler) syncFSCReady(ctx context.Context, fsc *fusio
 func (r *FileSystemClaimReconciler) hasConditionWithReason(conds []metav1.Condition, condType, reason string) bool {
 	cond := apimeta.FindStatusCondition(conds, condType)
 	return cond != nil && cond.Reason == reason
+}
+
+// calculateDeletionBackoff calculates exponential backoff for deletion retries
+// Returns the duration to wait before requeueing based on how long the condition has been blocked
+func (r *FileSystemClaimReconciler) calculateDeletionBackoff(fsc *fusionv1alpha1.FileSystemClaim, reason string) time.Duration {
+	const (
+		initialDelay = 30 * time.Second
+		maxDelay     = 10 * time.Minute
+	)
+
+	cond := apimeta.FindStatusCondition(fsc.Status.Conditions, ConditionTypeDeletionBlocked)
+	if cond == nil || cond.Reason != reason {
+		// First time seeing this blocker, start with initial delay
+		return initialDelay
+	}
+
+	// Calculate time since the condition was last transitioned to this reason
+	elapsed := time.Since(cond.LastTransitionTime.Time)
+
+	// Exponential backoff: 30s, 1m, 2m, 4m, 8m, max 10m
+	const (
+		oneMinute      = 1 * time.Minute
+		twoMinutes     = 2 * time.Minute
+		threeMinutes   = 3 * time.Minute
+		fourMinutes    = 4 * time.Minute
+		sevenMinutes   = 7 * time.Minute
+		eightMinutes   = 8 * time.Minute
+		fifteenMinutes = 15 * time.Minute
+	)
+
+	switch {
+	case elapsed < initialDelay:
+		return initialDelay
+	case elapsed < oneMinute:
+		return oneMinute
+	case elapsed < threeMinutes:
+		return twoMinutes
+	case elapsed < sevenMinutes:
+		return fourMinutes
+	case elapsed < fifteenMinutes:
+		return eightMinutes
+	default:
+		return maxDelay
+	}
 }
 
 // convert unstructured.Slice to metav1.Condition
@@ -1186,6 +1272,7 @@ func (r *FileSystemClaimReconciler) checkAllResourcesHealthy(
 }
 
 // createResourceWithOwnership creates a resource with owner reference in one call
+// helps creating LocalDisk or Filesystem
 func (r *FileSystemClaimReconciler) createResourceWithOwnership(
 	ctx context.Context,
 	fsc *fusionv1alpha1.FileSystemClaim,
@@ -1341,6 +1428,297 @@ func (r *FileSystemClaimReconciler) reconcileExistingStorageClass(
 	})
 }
 
+func (r *FileSystemClaimReconciler) isStorageClassInUse(
+	ctx context.Context,
+	fsc *fusionv1alpha1.FileSystemClaim,
+) (inUse bool, who string, err error) {
+	logger := log.FromContext(ctx)
+
+	scName := fsc.Name
+
+	var pvList corev1.PersistentVolumeList
+	if err := r.List(ctx, &pvList); errors.IsNotFound(err) {
+		// No PVs found, so SC is not in use
+		return false, "", nil
+	} else if err != nil {
+		logger.Error(err, "Failed to list PVs")
+		return false, "", err
+	}
+
+	var offendingPV []string
+	for i := range pvList.Items {
+		pv := &pvList.Items[i]
+
+		// Match only the SC we're interested in
+		if pv.Spec.StorageClassName != scName {
+			continue
+		}
+		// Deleting PVs don't block
+		if pv.DeletionTimestamp != nil {
+			continue
+		}
+
+		// Check if the PV is bound to a PVC
+		switch pv.Status.Phase {
+		case corev1.VolumeBound:
+			offendingPV = append(offendingPV, fmt.Sprintf("pv%s (BOUND)", pv.Name))
+		case corev1.VolumeReleased:
+			offendingPV = append(offendingPV, fmt.Sprintf("pv%s (RELEASED)", pv.Name))
+		default:
+			logger.Info("Unexpected PV phase", "name", pv.Name, "phase", pv.Status.Phase)
+		}
+	}
+
+	if len(offendingPV) > 0 {
+		const maxShow = 5
+		if len(offendingPV) > maxShow {
+			offendingPV = append(offendingPV[:maxShow], fmt.Sprintf("... and %d more", len(offendingPV)-maxShow))
+		}
+		who := "blocked because of the following PVs: " + strings.Join(offendingPV, ", ")
+		logger.Info("StorageClass is in use", "name", scName, "who", who)
+
+		return true, who, nil
+	}
+	return false, "", nil
+}
+
+// markDeletionRequested sets Ready=False with ReasonDeletionRequested
+func (r *FileSystemClaimReconciler) markDeletionRequested(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
+	if !r.hasConditionWithReason(fsc.Status.Conditions, ConditionTypeReady, ReasonDeletionRequested) {
+		changed, err := r.updateConditionIfChanged(ctx, fsc,
+			ConditionTypeReady,
+			metav1.ConditionFalse,
+			ReasonDeletionRequested,
+			"FileSystemClaim deletion was requested, proceeding with cleanup in this order: StorageClass, Filesystem, LocalDisk")
+		if err != nil {
+			return false, err
+		}
+		if changed {
+			log.FromContext(ctx).Info("Set Ready=False for deletion")
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// checkStorageClassUsage checks if SC is in use and blocks if needed
+func (r *FileSystemClaimReconciler) checkStorageClassUsage(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (time.Duration, bool, error) {
+	logger := log.FromContext(ctx)
+
+	if !r.isConditionTrue(fsc, ConditionTypeStorageClassCreated) {
+		return 0, false, nil // Already deleted
+	}
+
+	inUse, who, err := r.isStorageClassInUse(ctx, fsc)
+	if err != nil {
+		return 0, false, err
+	}
+
+	if inUse {
+		changed, e := r.updateConditionIfChanged(ctx, fsc,
+			ConditionTypeDeletionBlocked,
+			metav1.ConditionTrue,
+			ReasonStorageClassInUse,
+			who)
+		if e != nil {
+			return 0, false, e
+		}
+		requeueAfter := r.calculateDeletionBackoff(fsc, ReasonStorageClassInUse)
+		logger.Info("StorageClass is in use, blocking deletion", "name", fsc.Name, "who", who, "requeueAfter", requeueAfter)
+		return requeueAfter, changed, nil
+	}
+
+	logger.Info("StorageClass no longer in use, moving to next step")
+	return 0, false, nil
+}
+
+// checkFilesystemDeletionLabel checks if FS has deletion label and blocks if missing
+func (r *FileSystemClaimReconciler) checkFilesystemDeletionLabel(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (time.Duration, bool, error) {
+	logger := log.FromContext(ctx)
+
+	if !r.isConditionTrue(fsc, ConditionTypeFileSystemCreated) {
+		return 0, false, nil // Already deleted
+	}
+
+	fsList, err := r.listOwnedResources(ctx, fsc, schema.GroupVersionKind{
+		Group:   FileSystemGroup,
+		Version: FileSystemVersion,
+		Kind:    FileSystemKind,
+	}, FileSystemList)
+	if err != nil {
+		return 0, false, err
+	}
+
+	if len(fsList) > 1 {
+		return 0, false, fmt.Errorf("multiple Filesystems found for FSC %s", fsc.Name)
+	}
+
+	if len(fsList) > 0 {
+		fs := &fsList[0]
+		fslabels := fs.GetLabels()
+		if _, ok := fslabels[FileSystemDeletionLabel]; !ok {
+			changed, e := r.updateConditionIfChanged(ctx, fsc,
+				ConditionTypeDeletionBlocked,
+				metav1.ConditionTrue,
+				ReasonFileSystemLabelNotPresent,
+				fmt.Sprintf("Filesystem %s does not have the deletion label, "+
+					"user needs to add it and beware of data loss", fs.GetName()),
+			)
+			if e != nil {
+				return 0, false, e
+			}
+			requeueAfter := r.calculateDeletionBackoff(fsc, ReasonFileSystemLabelNotPresent)
+			logger.Info("Filesystem deletion label not present, blocking deletion", "filesystem", fs.GetName(), "requeueAfter", requeueAfter)
+			return requeueAfter, changed, nil
+		}
+	}
+
+	logger.Info("Filesystem deletion label present, moving to next step")
+	return 0, false, nil
+}
+
+// deleteStorageClass deletes the StorageClass and marks progress
+func (r *FileSystemClaimReconciler) deleteStorageClass(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	if !r.isConditionTrue(fsc, ConditionTypeStorageClassCreated) {
+		return false, nil // Already deleted
+	}
+
+	scName := fsc.Name
+	sc := &storagev1.StorageClass{}
+	if err := r.Get(ctx, types.NamespacedName{Name: scName}, sc); err == nil {
+		if err := r.Delete(ctx, sc); err != nil {
+			logger.Error(err, "Failed to delete StorageClass")
+			return false, err
+		}
+		logger.Info("Deleted StorageClass", "name", scName)
+		return true, nil
+	} else if !errors.IsNotFound(err) {
+		return false, err
+	}
+
+	// Mark as deleted
+	changed, err := r.updateConditionIfChanged(ctx, fsc,
+		ConditionTypeStorageClassCreated,
+		metav1.ConditionFalse,
+		ReasonStorageClassDeleted,
+		"StorageClass deleted, proceeding with Filesystem deletion")
+	if err != nil {
+		return false, err
+	}
+	if changed {
+		logger.Info("StorageClass deletion complete")
+	}
+	return changed, nil
+}
+
+// deleteFilesystem deletes the Filesystem and marks progress
+func (r *FileSystemClaimReconciler) deleteFilesystem(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (time.Duration, bool, error) {
+	const filesystemDeletionWait = 45 * time.Second
+
+	logger := log.FromContext(ctx)
+
+	if !r.isConditionTrue(fsc, ConditionTypeFileSystemCreated) {
+		return 0, false, nil // Already deleted
+	}
+
+	fsList, err := r.listOwnedResources(ctx, fsc, schema.GroupVersionKind{
+		Group:   FileSystemGroup,
+		Version: FileSystemVersion,
+		Kind:    FileSystemKind,
+	}, FileSystemList)
+	if err != nil {
+		return 0, false, err
+	}
+
+	if len(fsList) > 0 {
+		fs := &fsList[0]
+		if err := r.Delete(ctx, fs); err != nil {
+			logger.Error(err, "Failed to delete Filesystem")
+			return 0, false, err
+		}
+		logger.Info("Deleted Filesystem", "name", fs.GetName())
+		return filesystemDeletionWait, true, nil
+	}
+
+	// Mark as deleted
+	changed, err := r.updateConditionIfChanged(ctx, fsc,
+		ConditionTypeFileSystemCreated,
+		metav1.ConditionFalse,
+		ReasonFilesystemDeleted,
+		"Filesystem deleted, proceeding with LocalDisk deletion")
+	if err != nil {
+		return 0, false, err
+	}
+	if changed {
+		logger.Info("Filesystem deletion complete")
+		return 0, true, nil
+	}
+	return 0, false, nil
+}
+
+// deleteLocalDisks deletes all LocalDisks and marks progress
+func (r *FileSystemClaimReconciler) deleteLocalDisks(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (time.Duration, bool, error) {
+	const localDiskDeletionWait = 30 * time.Second
+
+	logger := log.FromContext(ctx)
+
+	if !r.isConditionTrue(fsc, ConditionTypeLocalDiskCreated) {
+		return 0, false, nil // Already deleted
+	}
+
+	ldList, err := r.listOwnedResources(ctx, fsc, schema.GroupVersionKind{
+		Group:   LocalDiskGroup,
+		Version: LocalDiskVersion,
+		Kind:    LocalDiskKind,
+	}, LocalDiskList)
+	if err != nil {
+		return 0, false, err
+	}
+
+	if len(ldList) > 0 {
+		for i := range ldList {
+			ld := &ldList[i]
+			if err := r.Delete(ctx, ld); err != nil {
+				logger.Error(err, "Failed to delete LocalDisk", "name", ld.GetName())
+				return 0, false, err
+			}
+			logger.Info("Deleted LocalDisk", "name", ld.GetName())
+		}
+		return localDiskDeletionWait, true, nil
+	}
+
+	// Mark as deleted
+	changed, err := r.updateConditionIfChanged(ctx, fsc,
+		ConditionTypeLocalDiskCreated,
+		metav1.ConditionFalse,
+		ReasonLocalDiskDeleted,
+		"LocalDisks deleted, proceeding with finalizer removal")
+	if err != nil {
+		return 0, false, err
+	}
+	if changed {
+		logger.Info("LocalDisk deletion complete")
+		return 0, true, nil
+	}
+	return 0, false, nil
+}
+
+// removeFinalizer removes the finalizer from FSC
+func (r *FileSystemClaimReconciler) removeFinalizer(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	if err := r.patchFSCSpec(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+		controllerutil.RemoveFinalizer(cur, FileSystemClaimFinalizer)
+	}); err != nil {
+		logger.Error(err, "Failed to remove finalizer")
+		return false, err
+	}
+	logger.Info("Removed finalizer, FileSystemClaim will be deleted", "name", fsc.Name)
+	return true, nil
+}
+
 // Helper functions -- END
 
 // Handlers for watched resources -- START
@@ -1473,7 +1851,7 @@ func didResourceStatusChange() builder.WatchesOption {
 // SetupWithManager sets up the controller with the Manager
 func (r *FileSystemClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&fusionv1alpha1.FileSystemClaim{}, builder.OnlyMetadata, builder.WithPredicates(predicate.NewPredicateFuncs(isInTargetNamespace))).
+		For(&fusionv1alpha1.FileSystemClaim{}, builder.WithPredicates(predicate.NewPredicateFuncs(isInTargetNamespace))).
 		Watches(
 			&unstructured.Unstructured{
 				Object: map[string]any{
