@@ -463,3 +463,26 @@ func MergeDockerSecrets(dest, src *corev1.Secret) (*corev1.Secret, error) {
 	}
 	return dest, nil
 }
+
+// UpdateCondition updates the condition in a resource's status
+// This is a generic utility function that can be used by any controller
+func UpdateCondition(conditions []metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string, generation int64) []metav1.Condition {
+	condition := metav1.Condition{
+		Type:               conditionType,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: generation,
+	}
+
+	// Find and update existing condition or append new one
+	for i, existingCondition := range conditions {
+		if existingCondition.Type == conditionType {
+			conditions[i] = condition
+			return conditions
+		}
+	}
+
+	return append(conditions, condition)
+}

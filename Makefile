@@ -162,6 +162,25 @@ test: manifests generate fmt vet envtest ## Run tests.
 test-e2e:
 	go test ./test/e2e/ -v -ginkgo.v
 
+.PHONY: test-benchmark
+test-benchmark: test-benchmark-individual test-benchmark-strategies ## Run all benchmark and performance comparison tests for FileSystemClaim controller.
+
+.PHONY: test-benchmark-individual
+test-benchmark-individual: ## Run individual benchmark tests (0ms and 100ms delays).
+	@echo "=== Individual Benchmark Tests ==="
+	go test -bench="BenchmarkReconcile0ms|BenchmarkReconcile100ms" -benchmem -benchtime=5s -run="^$$" ./internal/controller/
+
+.PHONY: test-benchmark-simple
+test-benchmark-simple: ## Run simple requeue logic benchmark tests (no external dependencies).
+	@echo "=== Simple Requeue Logic Benchmark Tests ==="
+	go test -bench="BenchmarkRequeueLogic" -benchmem -benchtime=5s -run="^$$" ./internal/controller/
+
+# NOTE: This test can be removed once we find the best RequeueDelay value.
+.PHONY: test-benchmark-strategies
+test-benchmark-strategies: ## Run timeout simulation benchmark tests (0ms, 10ms, 100ms, 500ms delays with actual waiting).
+	@echo "=== Timeout Simulation Benchmark Tests ==="
+	go test -bench="BenchmarkReconcileWithTimeouts" -benchmem -benchtime=5s -run="^$$" ./internal/controller/
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter & yamllint
 	$(GOLANGCI_LINT) run

@@ -1,0 +1,13 @@
+apiVersion: fusion.storage.openshift.io/v1alpha1
+kind: FileSystemClaim
+metadata:
+  labels:
+    app.kubernetes.io/name: openshift-fusion-access-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: filesystemclaim-sample
+spec:
+  devices:
+    - "/dev/nvme0n1"
+    - "/dev/nvme1n1"
+    - "/dev/nvme2n1"
+
