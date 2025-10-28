@@ -20,6 +20,8 @@ import (
 	fusionv1alpha1 "github.com/openshift-storage-scale/openshift-fusion-access-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // createStorageNode creates a Node with worker and storage labels for testing
@@ -115,4 +117,54 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 		}
 	}
 	return nil
+}
+
+// createV1LocalDisk creates an unstructured LocalDisk for v1.0 migration testing
+func createV1LocalDisk(name, namespace, devicePath, nodeName, filesystem string) *unstructured.Unstructured {
+	ld := &unstructured.Unstructured{
+		Object: map[string]any{
+			"spec": map[string]any{
+				"device": devicePath,
+				"node":   nodeName,
+			},
+			"status": map[string]any{
+				"filesystem": filesystem,
+			},
+		},
+	}
+	ld.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   LocalDiskGroup,
+		Version: LocalDiskVersion,
+		Kind:    LocalDiskKind,
+	})
+	ld.SetName(name)
+	ld.SetNamespace(namespace)
+	return ld
+}
+
+// createV1Filesystem creates an unstructured Filesystem for v1.0 migration testing
+//
+//nolint:unparam // name parameter is intentionally flexible for different test scenarios
+func createV1Filesystem(name, namespace string) *unstructured.Unstructured {
+	fs := &unstructured.Unstructured{
+		Object: map[string]any{
+			"spec": map[string]any{
+				"local": map[string]any{
+					"pools": []any{
+						map[string]any{
+							"name": "system",
+						},
+					},
+				},
+			},
+		},
+	}
+	fs.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   FileSystemGroup,
+		Version: FileSystemVersion,
+		Kind:    FileSystemKind,
+	})
+	fs.SetName(name)
+	fs.SetNamespace(namespace)
+	return fs
 }

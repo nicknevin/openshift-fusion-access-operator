@@ -109,6 +109,8 @@ const (
 	FileSystemKind    = "Filesystem"
 	FileSystemList    = "FilesystemList"
 
+	FileSystemClaimKind = "FileSystemClaim"
+
 	// Node validation labels
 	ScaleStorageRoleLabel = "scale.spectrum.ibm.com/role"
 	ScaleStorageRoleValue = "storage"
@@ -836,7 +838,7 @@ func (r *FileSystemClaimReconciler) patchFSCSpec(ctx context.Context, fsc *fusio
 // (Kind/APIVersion match; Controller bit not required).
 func isOwnedByThisFSC(obj client.Object, fscName string) bool {
 	for _, or := range obj.GetOwnerReferences() {
-		if or.Kind == "FileSystemClaim" &&
+		if or.Kind == FileSystemClaimKind &&
 			or.APIVersion == "fusion.storage.openshift.io/v1alpha1" &&
 			or.Name == fscName {
 			return true
@@ -1115,6 +1117,13 @@ func (r *FileSystemClaimReconciler) updateConditionIfChanged(
 	// Check if condition already has the desired state
 	prev := apimeta.FindStatusCondition(fsc.Status.Conditions, conditionType)
 	if prev != nil && prev.Status == status && prev.Reason == reason && prev.Message == message {
+		return false, nil
+	}
+
+	// Preserve migration status - don't overwrite conditions set during migration
+	// This keeps the audit trail showing resources were migrated from v1.0
+	if prev != nil && prev.Reason == MigrationReasonComplete && status == metav1.ConditionTrue {
+		// Condition is already True with MigrationComplete reason, keep it
 		return false, nil
 	}
 
