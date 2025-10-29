@@ -46,3 +46,7 @@ bundle/*
 # govulncheck outputs
 govulncheck.results
 /database
+
+# preflight outputs
+artifacts/
+preflight.log
