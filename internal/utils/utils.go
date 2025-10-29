@@ -214,8 +214,8 @@ func ParseYAMLAndExtractTestImage(yamlContent string) (string, error) {
 
 // GetExternalTestImage returns the image to be used for testing external image pull.
 // FIXME(bandini): For now this is hardcoded, we should make sure this is
-func GetExternalTestImage(cnsaVersion string) (string, error) {
-	manifestFile, err := GetInstallPath(cnsaVersion)
+func GetExternalTestImage() (string, error) {
+	_, manifestFile, err := GetStorageScaleVersion()
 	if err != nil {
 		return "", err
 	}
@@ -331,25 +331,48 @@ func CanPullImage(
 	return pollStatusFunc(ctx, cl, namespace, podName)
 }
 
-func GetInstallPath(cnsaVersion string) (string, error) {
-	// Install path when running tests
-	var err error
-	install_path := path.Join("../../files/", cnsaVersion, "install.yaml")
-	if _, err := os.Stat(install_path); err == nil {
-		return install_path, nil
-	}
-	// Install path when running locally
-	install_path = path.Join("files/", cnsaVersion, "install.yaml")
-	if _, err := os.Stat(install_path); err == nil {
-		return install_path, nil
-	}
-	// Install path when running in container
-	install_path = path.Join("/files/", cnsaVersion, "install.yaml")
-	if _, err := os.Stat(install_path); err == nil {
-		return install_path, nil
+func getSingleSubdirectory(dirPath string) (string, error) {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read directory %s: %w", dirPath, err)
 	}
 
-	return "", fmt.Errorf("could not find/open install file with version %s: %w", cnsaVersion, err)
+	var subdirs []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			subdirs = append(subdirs, entry.Name())
+		}
+	}
+
+	if len(subdirs) == 0 {
+		return "", fmt.Errorf("no subdirectories found in %s", dirPath)
+	}
+
+	if len(subdirs) > 1 {
+		return "", fmt.Errorf("expected exactly one subdirectory in %s, found %d: %v", dirPath, len(subdirs), subdirs)
+	}
+
+	return subdirs[0], nil
+}
+
+// By convention there must be single subdirectory in directory 'files' (whose location is dependent on the execution environment)
+// containing the install manifests for CNSA in file install.yaml. The name of this directory is the CNSA version.
+// Returns the CNSA version and the path to the install.yaml file.
+func GetStorageScaleVersion() (cnsaVersion, installPath string, err error) {
+	// Install base path when running tests
+	if cnsaVersion, err := getSingleSubdirectory("../../files"); err == nil {
+		return cnsaVersion, path.Join("../../files", cnsaVersion, "install.yaml"), nil
+	}
+	// Install path when running locally
+	if cnsaVersion, err := getSingleSubdirectory("./files"); err == nil {
+		return cnsaVersion, path.Join("./files", cnsaVersion, "install.yaml"), nil
+	}
+	// Install path when running in container
+	if cnsaVersion, err := getSingleSubdirectory("/files"); err == nil {
+		return cnsaVersion, path.Join("/files", cnsaVersion, "install.yaml"), nil
+	}
+
+	return "", "", fmt.Errorf("could not determine the CNSA version: %w", err)
 }
 
 func IsExternalManifestURLAllowed(url string) bool {

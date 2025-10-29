@@ -316,19 +316,32 @@ func (r *FusionAccessReconciler) Reconcile(
 		return ctrl.Result{}, err
 	}
 
-	install_path, err := getIbmManifest(fusionaccess.Spec)
+	cnsaVersion, installPath, err := getIbmManifest(fusionaccess.Spec)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
+	if cnsaVersion != "" && string(fusionaccess.Spec.StorageScaleVersion) != cnsaVersion {
+		log.Log.Info(fmt.Sprintf("Updating storageScaleVersion from %s to %s", fusionaccess.Spec.StorageScaleVersion, cnsaVersion))
+		fusionaccess.Spec.StorageScaleVersion = fusionv1alpha1.StorageScaleVersions(cnsaVersion)
+		err = r.Update(ctx, fusionaccess)
+		if err != nil {
+			log.Log.Error(err, "Failed to update FusionAccess storageScaleVersion")
+			return ctrl.Result{}, err
+		}
+		log.Log.Info("Successfully updated FusionAccess storageScaleVersion")
+		// Requeue to apply the manifest with the updated version
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	installManifest, err := manifestival.NewManifest(
-		install_path,
+		installPath,
 		manifestival.UseClient(mfc.NewClient(r.Client)),
 	)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	log.Log.Info(fmt.Sprintf("Applying manifest from %s", install_path))
+	log.Log.Info(fmt.Sprintf("Applying manifest from %s", installPath))
 
 	if err := installManifest.Apply(); err != nil {
 		log.Log.Error(err, "Error applying manifest")
@@ -341,7 +354,7 @@ func (r *FusionAccessReconciler) Reconcile(
 		}
 		return ctrl.Result{}, err
 	}
-	log.Log.Info(fmt.Sprintf("Applied manifest from %s", install_path))
+	log.Log.Info(fmt.Sprintf("Applied manifest from %s", installPath))
 	meta.SetStatusCondition(&fusionaccess.Status.Conditions,
 		v1.Condition{Type: "ManifestApply", Status: v1.ConditionTrue, Reason: "ReconcileCompleted", Message: "Storage Scale manifest was applied"})
 	serr := r.Status().Update(ctx, fusionaccess)
@@ -417,7 +430,7 @@ func (r *FusionAccessReconciler) Reconcile(
 	// Check if can pull the image if we have not already or if it failed previously
 	// Only do this check if we have a set cnsa version
 	if fusionaccess.Spec.StorageScaleVersion != "" {
-		err = r.runPullImageCheck(ctx, ns, fusionaccess)
+		err = r.runPullImageCheck(ctx, ns)
 		if err != nil {
 			fusionaccess.Status.Status = "ErrImagePull"
 			meta.SetStatusCondition(&fusionaccess.Status.Conditions,
@@ -503,8 +516,8 @@ func (r *FusionAccessReconciler) fusionAccessHandler(
 	return []reconcile.Request{req}
 }
 
-func (r *FusionAccessReconciler) runPullImageCheck(ctx context.Context, ns string, fusionaccess *fusionv1alpha1.FusionAccess) error {
-	testImage, err := utils.GetExternalTestImage(string(fusionaccess.Spec.StorageScaleVersion))
+func (r *FusionAccessReconciler) runPullImageCheck(ctx context.Context, ns string) error {
+	testImage, err := utils.GetExternalTestImage()
 	if err != nil {
 		log.Log.Error(err, "Could not figure out test image", "testImage", testImage)
 		return err
@@ -519,24 +532,22 @@ func (r *FusionAccessReconciler) runPullImageCheck(ctx context.Context, ns strin
 	return nil
 }
 
-func getIbmManifest(fusionobj fusionv1alpha1.FusionAccessSpec) (string, error) {
+func getIbmManifest(fusionobj fusionv1alpha1.FusionAccessSpec) (ibmCnsaVersion, installPath string, err error) {
 	extManifestURL := fusionobj.ExternalManifestURL
-	ibmCnsaVersion := fusionobj.StorageScaleVersion
 	if extManifestURL != "" {
-		log.Log.Info(fmt.Sprintf("Using external manifest URL: %s", extManifestURL))
 		if utils.IsExternalManifestURLAllowed(extManifestURL) {
-			return extManifestURL, nil
+			log.Log.Info(fmt.Sprintf("Using external manifest URL: %s", extManifestURL))
+			return "", extManifestURL, nil
 		}
-		return "", fmt.Errorf("disallowed URL for external manifest: %s", extManifestURL)
-	} else if ibmCnsaVersion != "" {
-		log.Log.Info(fmt.Sprintf("Using IBM repo manifest: %s", ibmCnsaVersion))
-		install_path, err := utils.GetInstallPath(string(ibmCnsaVersion))
-		if err != nil {
-			return "", err
-		}
-		return install_path, nil
+		return "", "", fmt.Errorf("disallowed URL for external manifest: %s", extManifestURL)
 	}
-	return "", fmt.Errorf("no Storage Scale manifest version and no external manifest specified")
+
+	ibmCnsaVersion, installPath, err = utils.GetStorageScaleVersion()
+	if err != nil {
+		return "", "", err
+	}
+	log.Log.Info(fmt.Sprintf("Using CNSA %s in %s", ibmCnsaVersion, installPath))
+	return ibmCnsaVersion, installPath, nil
 }
 
 // isItOurPullSecret returns true for Create or changed Update events
