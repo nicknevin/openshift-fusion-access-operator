@@ -18,13 +18,16 @@ package filesystemclaim
 
 import (
 	"context"
+	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -44,6 +47,44 @@ var _ = Describe("Migration Helper Functions", func() {
 		scheme = runtime.NewScheme()
 		Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
 		Expect(fusionv1alpha1.AddToScheme(scheme)).To(Succeed())
+	})
+
+	Describe("isNoCRDError", func() {
+		It("should detect NoResourceMatchError", func() {
+			err := &meta.NoResourceMatchError{
+				PartialResource: schema.GroupVersionResource{
+					Group:    "scale.spectrum.ibm.com",
+					Version:  "v1beta1",
+					Resource: "localdisks",
+				},
+			}
+			Expect(isNoCRDError(err)).To(BeTrue())
+		})
+
+		It("should detect NoKindMatchError", func() {
+			err := &meta.NoKindMatchError{
+				GroupKind: schema.GroupKind{
+					Group: "scale.spectrum.ibm.com",
+					Kind:  "LocalDisk",
+				},
+				SearchedVersions: []string{"v1beta1"},
+			}
+			Expect(isNoCRDError(err)).To(BeTrue())
+		})
+
+		It("should return false for nil error", func() {
+			Expect(isNoCRDError(nil)).To(BeFalse())
+		})
+
+		It("should return false for other errors", func() {
+			err := fmt.Errorf("connection refused")
+			Expect(isNoCRDError(err)).To(BeFalse())
+		})
+
+		It("should return false for NotFound errors", func() {
+			err := fmt.Errorf("localdisk \"test\" not found")
+			Expect(isNoCRDError(err)).To(BeFalse())
+		})
 	})
 
 	Describe("matchesWWNPattern", func() {

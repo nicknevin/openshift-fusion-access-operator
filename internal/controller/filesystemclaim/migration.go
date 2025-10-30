@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -162,6 +163,11 @@ func discoverLegacyLocalDisks(ctx context.Context, c client.Client) ([]*unstruct
 	})
 
 	if err := c.List(ctx, ldList, client.InNamespace(MigrationNamespace)); err != nil {
+		// Check if error is because CRD doesn't exist (fresh v1.1 install)
+		if isNoCRDError(err) {
+			logger.Info("LocalDisk CRD not found - this is a fresh v1.1 install, no migration needed")
+			return []*unstructured.Unstructured{}, nil
+		}
 		return nil, fmt.Errorf("failed to list LocalDisks: %w", err)
 	}
 
@@ -534,7 +540,7 @@ func updateOwnerRefsAndLabels(ctx context.Context, c client.Client, fsc *fusionv
 		logger.Info("Updated Filesystem")
 	}
 
-	// Update StorageClass if it exists
+	// Update StorageClass labels if it exists (no ownerRef - cluster-scoped resource)
 	if group.StorageClass != nil {
 		labels := group.StorageClass.GetLabels()
 		if labels == nil {
@@ -543,20 +549,13 @@ func updateOwnerRefsAndLabels(ctx context.Context, c client.Client, fsc *fusionv
 
 		// Check if already labeled
 		if labels[MigrationLabelMigrated] != MigrationLabelValueTrue {
-			// Add standard labels (NO ownerRef - StorageClass is cluster-scoped)
+			// Add standard ownership labels (NO ownerRef - StorageClass is cluster-scoped)
 			labels[FileSystemClaimOwnedByNameLabel] = fsc.Name
 			labels[FileSystemClaimOwnedByNamespaceLabel] = fsc.Namespace
-			labels[MigrationLabelMigrated] = MigrationLabelValueTrue
-			labels[MigrationLabelSource] = MigrationSourceV1
 			group.StorageClass.SetLabels(labels)
 
-			// Add timestamp as annotation (human-readable RFC3339 format)
-			annotations := group.StorageClass.GetAnnotations()
-			if annotations == nil {
-				annotations = make(map[string]string)
-			}
-			annotations[MigrationAnnotationTimestamp] = timestamp
-			group.StorageClass.SetAnnotations(annotations)
+			// Add migration labels and annotation using helper (consistent with LD/FS)
+			addMigrationLabels(group.StorageClass, timestamp)
 
 			if err := c.Update(ctx, group.StorageClass); err != nil {
 				return fmt.Errorf("failed to update StorageClass labels and annotations: %w", err)
@@ -647,4 +646,15 @@ func addMigrationLabels(obj client.Object, timestamp string) {
 	}
 	annotations[MigrationAnnotationTimestamp] = timestamp
 	obj.SetAnnotations(annotations)
+}
+
+// isNoCRDError checks if an error is because a CRD doesn't exist
+// This indicates a fresh v1.1 install where migration is not needed
+// Uses Kubernetes meta utilities for robust error detection
+func isNoCRDError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Use Kubernetes utility to detect NoMatch errors (CRD not found)
+	return meta.IsNoMatchError(err)
 }
