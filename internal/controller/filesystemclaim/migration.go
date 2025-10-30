@@ -164,7 +164,7 @@ func discoverLegacyLocalDisks(ctx context.Context, c client.Client) ([]*unstruct
 
 	if err := c.List(ctx, ldList, client.InNamespace(MigrationNamespace)); err != nil {
 		// Check if error is because CRD doesn't exist (fresh v1.1 install)
-		if isNoCRDError(err) {
+		if meta.IsNoMatchError(err) {
 			logger.Info("LocalDisk CRD not found - this is a fresh v1.1 install, no migration needed")
 			return []*unstructured.Unstructured{}, nil
 		}
@@ -646,15 +646,4 @@ func addMigrationLabels(obj client.Object, timestamp string) {
 	}
 	annotations[MigrationAnnotationTimestamp] = timestamp
 	obj.SetAnnotations(annotations)
-}
-
-// isNoCRDError checks if an error is because a CRD doesn't exist
-// This indicates a fresh v1.1 install where migration is not needed
-// Uses Kubernetes meta utilities for robust error detection
-func isNoCRDError(err error) bool {
-	if err == nil {
-		return false
-	}
-	// Use Kubernetes utility to detect NoMatch errors (CRD not found)
-	return meta.IsNoMatchError(err)
 }
