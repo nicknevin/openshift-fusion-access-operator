@@ -19,9 +19,6 @@ OPERATOR_DOCKERFILE ?= operator.Dockerfile
 DEVICEFINDER_DOCKERFILE ?= devicefinder.Dockerfile
 CONSOLE_PLUGIN_DOCKERFILE ?= console-plugin.Dockerfile
 
-# Version of yaml file to generate rbacs from
-RBAC_VERSION ?= v5.2.3.1
-
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
 # To re-generate a bundle for other specific channels without changing the standard setup, you can:
