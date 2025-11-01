@@ -155,10 +155,6 @@ func main() {
 			setupLog.Error(err, "unable to create webhook", "webhook", "FusionAccess")
 			os.Exit(1)
 		}
-		if err = (&fusionv1alpha.KMMPodMutator{}).SetupWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "KMMPod")
-			os.Exit(1)
-		}
 		if err = (&fusionv1alpha.FileSystemClaim{}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "FileSystemClaim")
 			os.Exit(1)
