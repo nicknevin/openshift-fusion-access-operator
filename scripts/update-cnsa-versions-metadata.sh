@@ -8,6 +8,11 @@
 
 CNSA_VERSION=$(cat CNSA_VERSION.txt)
 
+if [[ $CNSA_VERSION != v* ]]; then
+    echo "the CNSA version $CNSA_VERSION must start with a 'v'"
+    exit 1
+fi
+
 if [[ -f files/$CNSA_VERSION/install.yaml ]]; then
     echo "found CNSA version $CNSA_VERSION install.yaml"
 else

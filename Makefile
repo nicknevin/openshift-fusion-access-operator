@@ -237,13 +237,19 @@ generate-dockerfile-devicefinder:
 generate-dockerfile-console-plugin:
 	envsubst < templates/console-plugin.Dockerfile.template > $(CONSOLE_PLUGIN_DOCKERFILE)
 
+.PHONY: validate-cnsa
+validate-cnsa:
+	$(eval CNSA_VERSION := $(shell cat CNSA_VERSION.txt))
+	@if [[ $(CNSA_VERSION) != v* ]]; then echo "the CNSA version $(CNSA_VERSION) does not begin with a 'v'"; false; fi
+	@if [[ ! -f "files/$(CNSA_VERSION)/install.yaml" ]]; then echo "install.yaml for $(CNSA_VERSION) does not exist"; false; fi
+	@if [[ $(shell ls files | wc -l) != 1 ]]; then echo "there must be only one directory in ./files"; false; fi
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 TARGETARCH ?= amd64
 .PHONY: docker-build
-docker-build: generate-dockerfile-operator ## Build docker image with the manager.
+docker-build: validate-cnsa generate-dockerfile-operator ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build --build-arg TARGETARCH=$(TARGETARCH) -t $(OPERATOR_IMG) -f $(CURPATH)/$(OPERATOR_DOCKERFILE) .
 	$(CONTAINER_TOOL) tag $(OPERATOR_IMG) $(IMAGE_TAG_BASE)-operator:latest
 
