@@ -219,7 +219,7 @@ debug: manifests generate fmt vet ## Run and debug a controller from your host.
 .PHONY: clean
 clean: ## Remove build artifacts
 	rm -rf ./bundle
-	rm -f ./cover.out ./coverage.html ./config/samples/fusionaccess-catalog-*.yaml catalog-template.yaml
+	rm -f manager cover.out coverage.html config/samples/fusionaccess-catalog-*.yaml catalog-template.yaml
 
 .PHONY: clobber
 clobber: clean ## Remove build artifacts and downloaded tools

@@ -24,6 +24,7 @@ import (
 
 	mfc "github.com/manifestival/controller-runtime-client"
 	"github.com/manifestival/manifestival"
+	buildv1 "github.com/openshift/api/build/v1"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 
@@ -82,6 +83,9 @@ func NewFusionAccessReconciler(
 
 // Image repository (internal)
 //+kubebuilder:rbac:groups=imageregistry.operator.openshift.io,resources=configs,verbs=get;list;watch
+
+// Build resources (OpenShift)
+//+kubebuilder:rbac:groups=build.openshift.io,resources=builds,verbs=get;list;watch;delete
 
 // Below rules are inserted via `make rbac-generate` automatically
 // IBM_RBAC_MARKER_START
@@ -467,6 +471,47 @@ func (r *FusionAccessReconciler) Reconcile(
 	return ctrl.Result{}, nil
 }
 
+// buildHandler handles Build resources and deletes them if they have Phase: Error with reason: BuildPodDeleted
+func (r *FusionAccessReconciler) buildHandler(ctx context.Context, obj client.Object) []reconcile.Request {
+	build, ok := obj.(*buildv1.Build)
+	if !ok {
+		return nil
+	}
+
+	if build.Status.Phase == buildv1.BuildPhaseError && build.Status.Reason == buildv1.StatusReasonBuildPodDeleted {
+		log.Log.Info("Deleting Build with BuildPodDeleted error", "build", build.Name, "namespace", build.Namespace)
+		if err := r.Delete(ctx, build); err != nil {
+			log.Log.Error(err, "Failed to delete Build", "build", build.Name, "namespace", build.Namespace)
+		} else {
+			log.Log.Info("Successfully deleted Build", "build", build.Name, "namespace", build.Namespace)
+		}
+	}
+
+	return nil
+}
+
+// isBuildWithPodDeleted returns a predicate that filters Build resources with Phase: Error and Reason: BuildPodDeleted
+func isBuildWithPodDeleted() builder.WatchesOption {
+	return builder.WithPredicates(predicate.Funcs{
+		CreateFunc: func(_ event.CreateEvent) bool {
+			return false
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			newBuild, ok := e.ObjectNew.(*buildv1.Build)
+			if !ok {
+				return false
+			}
+			return newBuild.Status.Phase == buildv1.BuildPhaseError && newBuild.Status.Reason == buildv1.StatusReasonBuildPodDeleted
+		},
+		DeleteFunc: func(_ event.DeleteEvent) bool {
+			return false
+		},
+		GenericFunc: func(_ event.GenericEvent) bool {
+			return false
+		},
+	})
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *FusionAccessReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -487,6 +532,11 @@ func (r *FusionAccessReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.fusionAccessHandler),
 			didTheKmmConfigMapChange(),
 			builder.OnlyMetadata,
+		).
+		Watches(
+			&buildv1.Build{},
+			handler.EnqueueRequestsFromMapFunc(r.buildHandler),
+			isBuildWithPodDeleted(),
 		).
 		Complete(r)
 }
