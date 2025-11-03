@@ -18,13 +18,16 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
 	mfc "github.com/manifestival/controller-runtime-client"
 	"github.com/manifestival/manifestival"
 	buildv1 "github.com/openshift/api/build/v1"
+	kmmv1beta1 "github.com/rh-ecosystem-edge/kernel-module-management/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 
@@ -471,10 +474,20 @@ func (r *FusionAccessReconciler) Reconcile(
 	return ctrl.Result{}, nil
 }
 
-// buildHandler handles Build resources and deletes them if they have Phase: Error with reason: BuildPodDeleted
 func (r *FusionAccessReconciler) buildHandler(ctx context.Context, obj client.Object) []reconcile.Request {
 	build, ok := obj.(*buildv1.Build)
 	if !ok {
+		return nil
+	}
+
+	buildJSON, err := json.Marshal(build)
+	if err != nil {
+		log.Log.Error(err, "Failed to marshal build to JSON", "build", build.Name, "namespace", build.Namespace)
+	} else {
+		log.Log.Info("Build object", "buildJSON", string(buildJSON))
+	}
+
+	if build.DeletionTimestamp != nil {
 		return nil
 	}
 
@@ -490,24 +503,93 @@ func (r *FusionAccessReconciler) buildHandler(ctx context.Context, obj client.Ob
 	return nil
 }
 
+func (r *FusionAccessReconciler) kmmModuleHandler(_ context.Context, obj client.Object) []reconcile.Request {
+	module, ok := obj.(*kmmv1beta1.Module)
+	if !ok {
+		return nil
+	}
+
+	moduleJSON, err := json.Marshal(module)
+	if err != nil {
+		log.Log.Error(err, "Failed to marshal KMM Module to JSON", "module", module.Name, "namespace", module.Namespace)
+	} else {
+		log.Log.Info("KMM Module object", "moduleJSON", string(moduleJSON))
+	}
+
+	return nil
+}
+
+func (r *FusionAccessReconciler) podHandler(_ context.Context, obj client.Object) []reconcile.Request {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return nil
+	}
+
+	podJSON, err := json.Marshal(pod)
+	if err != nil {
+		log.Log.Error(err, "Failed to marshal Pod to JSON", "pod", pod.Name, "namespace", pod.Namespace)
+	} else {
+		log.Log.Info("Pod object", "podJSON", string(podJSON))
+	}
+
+	return nil
+}
+
 // isBuildWithPodDeleted returns a predicate that filters Build resources with Phase: Error and Reason: BuildPodDeleted
 func isBuildWithPodDeleted() builder.WatchesOption {
 	return builder.WithPredicates(predicate.Funcs{
 		CreateFunc: func(_ event.CreateEvent) bool {
-			return false
+			return true
 		},
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			newBuild, ok := e.ObjectNew.(*buildv1.Build)
-			if !ok {
-				return false
-			}
-			return newBuild.Status.Phase == buildv1.BuildPhaseError && newBuild.Status.Reason == buildv1.StatusReasonBuildPodDeleted
+		UpdateFunc: func(_ event.UpdateEvent) bool {
+			return true
 		},
 		DeleteFunc: func(_ event.DeleteEvent) bool {
-			return false
+			return true
 		},
 		GenericFunc: func(_ event.GenericEvent) bool {
-			return false
+			return true
+		},
+	})
+}
+
+// isKMMModuleInFusionNamespace returns a predicate that filters KMM Module resources in the ibm-fusion-access namespace
+func isKMMModuleInFusionNamespace() builder.WatchesOption {
+	const namespace = "ibm-fusion-access"
+	return builder.WithPredicates(predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			return e.Object.GetNamespace() == namespace
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return e.ObjectNew.GetNamespace() == namespace
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			return e.Object.GetNamespace() == namespace
+		},
+		GenericFunc: func(e event.GenericEvent) bool {
+			return e.Object.GetNamespace() == namespace
+		},
+	})
+}
+
+func podNameOfInterest(name string) bool {
+	return strings.HasPrefix(name, "kmm-worker") || strings.HasPrefix(name, "gpfs-module-build")
+}
+
+func isPodOfInterest() builder.WatchesOption {
+	const namespace = "ibm-fusion-access"
+	return builder.WithPredicates(predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			return e.Object.GetNamespace() == namespace && podNameOfInterest(e.Object.GetName())
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return e.ObjectNew.GetNamespace() == namespace && podNameOfInterest(e.ObjectNew.GetName())
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			return e.Object.GetNamespace() == namespace && podNameOfInterest(e.Object.GetName())
+		},
+		GenericFunc: func(e event.GenericEvent) bool {
+			return e.Object.GetNamespace() == namespace && podNameOfInterest(e.Object.GetName())
 		},
 	})
 }
@@ -537,6 +619,16 @@ func (r *FusionAccessReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&buildv1.Build{},
 			handler.EnqueueRequestsFromMapFunc(r.buildHandler),
 			isBuildWithPodDeleted(),
+		).
+		Watches(
+			&kmmv1beta1.Module{},
+			handler.EnqueueRequestsFromMapFunc(r.kmmModuleHandler),
+			isKMMModuleInFusionNamespace(),
+		).
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(r.podHandler),
+			isPodOfInterest(),
 		).
 		Complete(r)
 }

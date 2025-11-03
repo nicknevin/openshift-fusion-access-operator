@@ -487,9 +487,11 @@ fetchyaml: ## Fetches install yaml files
 tool-versions: opm
 	$(OPM) version
 
+.PHONY: release
 release: manifests generate docker-build docker-push console-build console-push devicefinder-docker-build devicefinder-docker-push \
-           bundle bundle-build bundle-push
+          bundle bundle-build bundle-push
 
+.PHONY: fbc
 fbc:
 	rm -rf catalog catalog.Dockerfile
 	mkdir -p catalog/openshift-fusion-access-operator
@@ -501,8 +503,8 @@ fbc:
 	opm alpha render-template basic catalog-template.yaml -o yaml > catalog/catalog.yaml
 	opm validate catalog
 	podman build . -f catalog.Dockerfile -t openshift-fusion-access-catalog:latest
-	podman tag openshift-fusion-access-catalog:latest ${REGISTRY}/openshift-fusion-access-catalog:latest
 
+.PHONY: _fbc-push
 fbc-push:
 	podman tag openshift-fusion-access-catalog:latest ${REGISTRY}/openshift-fusion-access-catalog:${CHANNEL}
 	podman push ${REGISTRY}/openshift-fusion-access-catalog:${CHANNEL}
