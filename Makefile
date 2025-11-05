@@ -219,7 +219,7 @@ debug: manifests generate fmt vet ## Run and debug a controller from your host.
 .PHONY: clean
 clean: ## Remove build artifacts
 	rm -rf ./bundle
-	rm -f ./cover.out ./coverage.html ./config/samples/fusionaccess-catalog-*.yaml catalog-template.yaml
+	rm -f manager cover.out coverage.html config/samples/fusionaccess-catalog-*.yaml catalog-template.yaml
 
 .PHONY: clobber
 clobber: clean ## Remove build artifacts and downloaded tools
@@ -487,9 +487,19 @@ fetchyaml: ## Fetches install yaml files
 tool-versions: opm
 	$(OPM) version
 
+.PHONY: release fbc-push
+ifeq "$(origin VERSION)" "command line"
 release: manifests generate docker-build docker-push console-build console-push devicefinder-docker-build devicefinder-docker-push \
-           bundle bundle-build bundle-push
+         bundle bundle-build bundle-push
+fbc-push:
+	podman tag openshift-fusion-access-catalog:latest ${REGISTRY}/openshift-fusion-access-catalog:${CHANNEL}
+	podman push ${REGISTRY}/openshift-fusion-access-catalog:${CHANNEL}
+else
+release fbc-push:
+	@echo "VERSION must be specified on the command line" && false
+endif
 
+.PHONY: fbc
 fbc:
 	rm -rf catalog catalog.Dockerfile
 	mkdir -p catalog/openshift-fusion-access-operator
@@ -501,11 +511,6 @@ fbc:
 	opm alpha render-template basic catalog-template.yaml -o yaml > catalog/catalog.yaml
 	opm validate catalog
 	podman build . -f catalog.Dockerfile -t openshift-fusion-access-catalog:latest
-	podman tag openshift-fusion-access-catalog:latest ${REGISTRY}/openshift-fusion-access-catalog:latest
-
-fbc-push:
-	podman tag openshift-fusion-access-catalog:latest ${REGISTRY}/openshift-fusion-access-catalog:${CHANNEL}
-	podman push ${REGISTRY}/openshift-fusion-access-catalog:${CHANNEL}
 
 fbc-graph:
 	@opm alpha render-graph catalog
