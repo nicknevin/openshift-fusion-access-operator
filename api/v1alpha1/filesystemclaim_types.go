@@ -34,6 +34,7 @@ type FileSystemClaimStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=fsc
 
 // FileSystemClaim is the Schema for the filesystemclaims API.
 type FileSystemClaim struct {
