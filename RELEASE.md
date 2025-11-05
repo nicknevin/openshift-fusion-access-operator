@@ -31,7 +31,7 @@ This is totally temporary for now. We'll automate this later
 1. Amend the [Fusion Access for SAN Install](https://docs.google.com/document/d/16dCr9wtK9j5l7nY8w-CCfju93tIV3rcMvslelGkUvEw/edit?tab=t.h0mrtvcsp9vb) doc and announce it on Slack in @team-ecoeng-forum-access mentioning _@fusion-access-qe_ and _@fusion-access-eng_
 
 
-# Releasing a new offical release in the Certified Operators catalog
+# Releasing a new official release in the Certified Operators catalog
 
 1. Do a build following the same steps as for a new internal release. This is necessary to get the release version reflected in the metadata.
 
