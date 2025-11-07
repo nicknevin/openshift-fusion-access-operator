@@ -24,6 +24,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	buildv1 "github.com/openshift/api/build/v1"
 	configv1 "github.com/openshift/api/config/v1"
 	consolev1 "github.com/openshift/api/console/v1"
 	operatorv1 "github.com/openshift/api/operator/v1"
@@ -104,6 +105,7 @@ func createFakeScheme() *kruntime.Scheme {
 		consolev1.AddToScheme,
 		operatorv1.AddToScheme,
 		kmmv1beta1.AddToScheme,
+		buildv1.AddToScheme,
 	)
 	Expect(builder.AddToScheme(s)).To(Succeed())
 	return s

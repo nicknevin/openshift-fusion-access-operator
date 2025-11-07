@@ -41,6 +41,7 @@ import (
 	"github.com/go-logr/logr"
 	kmmv1beta1 "github.com/rh-ecosystem-edge/kernel-module-management/api/v1beta1"
 
+	buildv1 "github.com/openshift/api/build/v1"
 	consolev1 "github.com/openshift/api/console/v1"
 	imageregistryv1 "github.com/openshift/api/imageregistry/v1"
 	operatorv1 "github.com/openshift/api/operator/v1"
@@ -63,6 +64,8 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(fusionv1alpha.AddToScheme(scheme))
+
+	utilruntime.Must(buildv1.AddToScheme(scheme))
 
 	utilruntime.Must(consolev1.AddToScheme(scheme))
 
