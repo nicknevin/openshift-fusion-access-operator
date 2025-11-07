@@ -271,7 +271,6 @@ func (r *FusionAccessReconciler) Reconcile(
 ) (ctrl.Result, error) {
 	_ = log.FromContext(ctx)
 
-	// TODO(user): your logic here
 	fusionaccess := &fusionv1alpha1.FusionAccess{}
 	err := r.Get(ctx, req.NamespacedName, fusionaccess)
 	if err != nil {
@@ -281,36 +280,6 @@ func (r *FusionAccessReconciler) Reconcile(
 		return ctrl.Result{}, err
 	}
 
-	// // Check if the FusionAccess instance is marked to be deleted, which is
-	// // indicated by the deletion timestamp being set.
-	// isFusionAccessMarkedToBeDeleted := fusionaccess.GetDeletionTimestamp() != nil
-	// if isFusionAccessMarkedToBeDeleted {
-	// 	if controllerutil.ContainsFinalizer(fusionaccess, storageScaleFinalizer) {
-	// 		// Run finalization logic for storageScaleFinalizer. If the
-	// 		// finalization logic fails, don't remove the finalizer so
-	// 		// that we can retry during the next reconciliation.
-	// 		if err := r.finalizeFusionAccess(log.Log, fusionaccess); err != nil {
-	// 			return ctrl.Result{}, err
-	// 		}
-
-	// 		// Remove memcachedFinalizer. Once all finalizers have been
-	// 		// removed, the object will be deleted.
-	// 		controllerutil.RemoveFinalizer(fusionaccess, storageScaleFinalizer)
-	// 		err := r.Update(ctx, fusionaccess)
-	// 		if err != nil {
-	// 			return ctrl.Result{}, err
-	// 		}
-	// 	}
-	// 	return ctrl.Result{}, nil
-	// }
-	// // Add finalizer for this CR
-	// if !controllerutil.ContainsFinalizer(fusionaccess, storageScaleFinalizer) {
-	// 	controllerutil.AddFinalizer(fusionaccess, storageScaleFinalizer)
-	// 	err = r.Update(ctx, fusionaccess)
-	// 	if err != nil {
-	// 		return ctrl.Result{}, err
-	// 	}
-	// }
 	ns, err := utils.GetDeploymentNamespace()
 	if err != nil {
 		return ctrl.Result{}, err
