@@ -168,6 +168,15 @@ rules:
   - update
   - watch
 - apiGroups:
+  - build.openshift.io
+  resources:
+  - builds
+  verbs:
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
   - config.openshift.io
   resources:
   - clusterversions
@@ -366,6 +375,7 @@ rules:
   - get
   - list
   - patch
+  - update
   - watch
 - apiGroups:
   - rbac.authorization.k8s.io

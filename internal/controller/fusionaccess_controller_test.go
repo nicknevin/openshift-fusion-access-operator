@@ -26,9 +26,12 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	buildv1 "github.com/openshift/api/build/v1"
 	configv1 "github.com/openshift/api/config/v1"
 	operatorv1 "github.com/openshift/api/operator/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -155,6 +158,157 @@ var _ = Describe("FusionAccess Controller Suite", func() {
 				updated := &fusionv1alpha.FusionAccess{}
 				err = k8sClient.Get(ctx, typeNamespacedName, updated)
 				Expect(err).ToNot(HaveOccurred())
+			})
+
+			It("should not delete the PDB when there are Builds", func() {
+				resource := &fusionv1alpha.FusionAccess{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      resourceName,
+						Namespace: "default",
+					},
+					Spec: fusionv1alpha.FusionAccessSpec{
+						StorageScaleVersion:  fusionv1alpha.StorageScaleVersions(cnsaVersion),
+						LocalVolumeDiscovery: fusionv1alpha.StorageDeviceDiscovery{
+							// Create: false,
+						},
+					},
+				}
+				pdb := &policyv1.PodDisruptionBudget{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kmm-pdb",
+						Namespace: "default",
+						Labels: map[string]string{
+							podDisruptionDeleteLabel: "",
+						},
+					},
+				}
+				build := &buildv1.Build{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-build",
+						Namespace: "default",
+					},
+				}
+
+				k8sClient = fakeClientBuilder.WithRuntimeObjects(resource, pdb, build).Build()
+				Expect(k8sClient).NotTo(BeNil())
+
+				By("Fooing the custom resource created")
+				FusionAccessReconciler := &FusionAccessReconciler{
+					Client: k8sClient,
+					Scheme: k8sClient.Scheme(),
+					CanPullImage: func(ctx context.Context, client client.Client, ns, image, pullSecret string) (bool, error) {
+						return true, nil
+					},
+				}
+
+				_, err := FusionAccessReconciler.managePodDisruptionBudget(ctx, resource)
+				Expect(err).ToNot(HaveOccurred())
+
+				pdb = &policyv1.PodDisruptionBudget{}
+				pdbName := types.NamespacedName{
+					Name:      "kmm-pdb",
+					Namespace: "default",
+				}
+				err = k8sClient.Get(ctx, pdbName, pdb)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			It("should delete the PDB when there are no Builds and it is labeled", func() {
+				resource := &fusionv1alpha.FusionAccess{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      resourceName,
+						Namespace: "default",
+					},
+					Spec: fusionv1alpha.FusionAccessSpec{
+						StorageScaleVersion:  fusionv1alpha.StorageScaleVersions(cnsaVersion),
+						LocalVolumeDiscovery: fusionv1alpha.StorageDeviceDiscovery{
+							// Create: false,
+						},
+					},
+				}
+				pdb := &policyv1.PodDisruptionBudget{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kmm-pdb",
+						Namespace: "default",
+						Labels: map[string]string{
+							podDisruptionDeleteLabel: "",
+						},
+					},
+				}
+
+				k8sClient = fakeClientBuilder.WithRuntimeObjects(resource, pdb).Build()
+				Expect(k8sClient).NotTo(BeNil())
+
+				FusionAccessReconciler := &FusionAccessReconciler{
+					Client: k8sClient,
+					Scheme: k8sClient.Scheme(),
+					CanPullImage: func(ctx context.Context, client client.Client, ns, image, pullSecret string) (bool, error) {
+						return true, nil
+					},
+				}
+
+				_, err := FusionAccessReconciler.managePodDisruptionBudget(ctx, resource)
+				Expect(err).ToNot(HaveOccurred())
+
+				pdb = &policyv1.PodDisruptionBudget{}
+				pdbName := types.NamespacedName{
+					Name:      "kmm-pdb",
+					Namespace: "default",
+				}
+				err = k8sClient.Get(ctx, pdbName, pdb)
+				Expect(err).To(HaveOccurred())
+				Expect(errors.IsNotFound(err)).To(BeTrue())
+			})
+
+			It("should add the label to the PDB when there are Builds", func() {
+				resource := &fusionv1alpha.FusionAccess{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      resourceName,
+						Namespace: "default",
+					},
+					Spec: fusionv1alpha.FusionAccessSpec{
+						StorageScaleVersion:  fusionv1alpha.StorageScaleVersions(cnsaVersion),
+						LocalVolumeDiscovery: fusionv1alpha.StorageDeviceDiscovery{
+							// Create: false,
+						},
+					},
+				}
+				pdb := &policyv1.PodDisruptionBudget{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kmm-pdb",
+						Namespace: "default",
+					},
+				}
+				build1 := &buildv1.Build{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-build-1",
+						Namespace: "default",
+					},
+				}
+
+				k8sClient = fakeClientBuilder.WithRuntimeObjects(resource, pdb, build1).Build()
+				Expect(k8sClient).NotTo(BeNil())
+
+				FusionAccessReconciler := &FusionAccessReconciler{
+					Client: k8sClient,
+					Scheme: k8sClient.Scheme(),
+					CanPullImage: func(ctx context.Context, client client.Client, ns, image, pullSecret string) (bool, error) {
+						return true, nil
+					},
+				}
+
+				_, err := FusionAccessReconciler.managePodDisruptionBudget(ctx, resource)
+				Expect(err).ToNot(HaveOccurred())
+
+				pdb = &policyv1.PodDisruptionBudget{}
+				pdbName := types.NamespacedName{
+					Name:      "kmm-pdb",
+					Namespace: "default",
+				}
+				err = k8sClient.Get(ctx, pdbName, pdb)
+				Expect(err).ToNot(HaveOccurred())
+				_, exists := pdb.Labels[podDisruptionDeleteLabel]
+				Expect(exists).To(BeTrue())
 			})
 		})
 	})
