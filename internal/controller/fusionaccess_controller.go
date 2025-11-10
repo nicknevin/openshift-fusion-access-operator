@@ -494,7 +494,11 @@ func (r *FusionAccessReconciler) buildHandler(ctx context.Context, obj client.Ob
 	if build.Status.Phase == buildv1.BuildPhaseError && build.Status.Reason == buildv1.StatusReasonBuildPodDeleted {
 		log.Log.Info("Deleting Build with BuildPodDeleted error", "build", build.Name, "namespace", build.Namespace)
 		if err := r.Delete(ctx, build); err != nil {
-			log.Log.Error(err, "Failed to delete Build", "build", build.Name, "namespace", build.Namespace)
+			if kerrors.IsNotFound(err) {
+				log.Log.Info("Build not found", "build", build.Name, "namespace", build.Namespace)
+			} else {
+				log.Log.Error(err, "Failed to delete Build", "build", build.Name, "namespace", build.Namespace)
+			}
 		} else {
 			log.Log.Info("Successfully deleted Build", "build", build.Name, "namespace", build.Namespace)
 		}
