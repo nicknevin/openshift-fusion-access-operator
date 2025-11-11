@@ -135,9 +135,9 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
             ;;
         *)
             echo "Usage: $0 {dangling|cache|all}"
-            echo "  dangling - Clean up dangling and unused images"
-            echo "  cache    - Clean up build cache"  
-            echo "  all      - Run all cleanup operations"
+            echo "  dangling - Clean up dangling images only (preserves build cache)"
+            echo "  cache    - Clean up build cache only"  
+            echo "  all      - Clean up ALL images and cache (WARNING: forces full rebuilds)"
             exit 1
             ;;
     esac
