@@ -7,6 +7,58 @@ OPERATOR="openshift-fusion-access-operator"
 VERSION="${VERSION:-6.6.6}"
 REGISTRY="${REGISTRY:-kuemper.int.rhx/bandini}"
 
+# Image cleanup configuration
+CLEANUP_IMAGES="${CLEANUP_IMAGES:-true}"  # Set to false to disable automatic cleanup
+CONTAINER_TOOL="${CONTAINER_TOOL:-podman}"
+
+cleanup_dangling_images() {
+    if [ "$CLEANUP_IMAGES" != "true" ]; then
+        echo "🔧 Image cleanup disabled (CLEANUP_IMAGES=$CLEANUP_IMAGES)"
+        return 0
+    fi
+    
+    echo "🧹 Cleaning up dangling images to free disk space..."
+    
+    # Count images before cleanup
+    IMAGES_BEFORE=$($CONTAINER_TOOL images -a | wc -l)
+    echo "   Images before cleanup: $((IMAGES_BEFORE - 1))"  # Subtract header line
+    
+    # Remove dangling images (untagged, orphaned layers)
+    echo "   Removing dangling images..."
+    $CONTAINER_TOOL image prune -f || {
+        echo "⚠️  Warning: Failed to prune dangling images (this is usually safe to ignore)"
+    }
+    
+    # Remove unused images older than 24 hours (keeps recent cache layers)
+    echo "   Removing unused images older than 24 hours..."
+    $CONTAINER_TOOL image prune -a --filter "until=24h" -f || {
+        echo "⚠️  Warning: Failed to prune old images (this is usually safe to ignore)"
+    }
+    
+    # Count images after cleanup
+    IMAGES_AFTER=$($CONTAINER_TOOL images -a | wc -l)
+    CLEANED=$((IMAGES_BEFORE - IMAGES_AFTER))
+    echo "   Images after cleanup: $((IMAGES_AFTER - 1))"
+    echo "   ✅ Cleaned up $CLEANED dangling/unused images"
+    
+    # Show disk space saved
+    echo "   Current disk usage:"
+    $CONTAINER_TOOL system df || true
+}
+
+cleanup_build_cache() {
+    if [ "$CLEANUP_IMAGES" != "true" ]; then
+        return 0
+    fi
+    
+    echo "🧹 Cleaning up build cache..."
+    
+    # Remove build cache (but keep base images)
+    $CONTAINER_TOOL builder prune -f || {
+        echo "⚠️  Note: Build cache cleanup not available (older podman version)"
+    }
+}
+
 wait_for_resource() {
     local resource_type=$1  # Either "packagemanifest", "operator", or "csv"
     local name=$2           # Name of the resource (e.g., Operator or CSV)
@@ -324,9 +376,16 @@ if [ $ret -ne 0 ]; then
     exit 1
 fi
 
+# Clean up old images before starting to free disk space
+cleanup_dangling_images
+
+echo "🚀 Building and pushing all images..."
 make VERSION=${VERSION} IMAGE_TAG_BASE=${REGISTRY}/openshift-fusion-access CHANNELS=fast USE_IMAGE_DIGESTS="" \
     manifests bundle generate docker-build docker-push bundle-build bundle-push console-build console-push \
     devicefinder-docker-build devicefinder-docker-push catalog-build catalog-push
+
+# Clean up dangling images created during build
+cleanup_dangling_images
 
 # Verify catalog image exists before proceeding
 verify_catalog_image || echo "⚠️  Image verification failed, continuing anyway..."
@@ -444,3 +503,12 @@ if [ -z "${INSTALLED_CSV}" ]; then
 fi
 
 wait_for_resource "csv" "${INSTALLED_CSV}" "${NS}"
+
+# Final cleanup to remove any remaining dangling images
+echo "🎉 Build and deployment completed successfully!"
+cleanup_dangling_images
+cleanup_build_cache
+
+echo "✅ All done! Operator ${OPERATOR} is now installed and running in namespace ${NS}"
+echo "📊 Final system status:"
+$CONTAINER_TOOL system df || true
