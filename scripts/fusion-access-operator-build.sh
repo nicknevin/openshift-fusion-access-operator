@@ -17,12 +17,12 @@ source "${SCRIPT_DIR}/image-cleanup.sh"
 
 # Setup EXIT trap for final cleanup
 cleanup_on_exit() {
-    echo "🎉 Build process completed!"
+    echo "INFO: Build process completed!"
     if [ "$CLEANUP_IMAGES" = "true" ]; then
-        echo "🧹 Running final cleanup..."
+        echo "INFO: Running final cleanup..."
         cleanup_dangling_images
         cleanup_build_cache
-        echo "📊 Final system status:"
+        echo "INFO: Final system status:"
         $CONTAINER_TOOL system df || true
     fi
 }
@@ -351,7 +351,7 @@ fi
 # Note: Final cleanup handled automatically by EXIT trap
 cleanup_dangling_images
 
-echo "🚀 Building and pushing all images..."
+echo "INFO: Building and pushing all images..."
 make VERSION=${VERSION} IMAGE_TAG_BASE=${REGISTRY}/openshift-fusion-access CHANNELS=fast USE_IMAGE_DIGESTS="" \
     manifests bundle generate docker-build docker-push bundle-build bundle-push console-build console-push \
     devicefinder-docker-build devicefinder-docker-push catalog-build catalog-push
@@ -473,5 +473,5 @@ fi
 
 wait_for_resource "csv" "${INSTALLED_CSV}" "${NS}"
 
-echo "✅ All done! Operator ${OPERATOR} is now installed and running in namespace ${NS}"
+echo "SUCCESS: All done! Operator ${OPERATOR} is now installed and running in namespace ${NS}"
 # Note: Final cleanup will be handled automatically by EXIT trap

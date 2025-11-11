@@ -1,5 +1,6 @@
 #!/bin/bash
 # Shared image cleanup utilities for build system
+# Plain text output for better CI compatibility and machine readability
 # Used by both fusion-access-operator-build.sh and Makefile targets
 
 set -e
@@ -7,6 +8,7 @@ set -e
 # Configuration
 CONTAINER_TOOL="${CONTAINER_TOOL:-podman}"
 CLEANUP_IMAGES="${CLEANUP_IMAGES:-true}"
+# Plain text output for better CI compatibility and machine readability
 
 get_image_count() {
     # Use proper container tool output instead of fragile wc -l approach
@@ -24,11 +26,11 @@ check_until_filter_support() {
 
 cleanup_dangling_images() {
     if [ "$CLEANUP_IMAGES" != "true" ]; then
-        echo "🔧 Image cleanup disabled (CLEANUP_IMAGES=$CLEANUP_IMAGES)"
+        echo "INFO: Image cleanup disabled (CLEANUP_IMAGES=$CLEANUP_IMAGES)"
         return 0
     fi
     
-    echo "🧹 Cleaning up dangling images to free disk space..."
+    echo "INFO: Cleaning up dangling images to free disk space..."
     
     # Count images before cleanup using proper method
     IMAGES_BEFORE=$(get_image_count)
@@ -37,7 +39,7 @@ cleanup_dangling_images() {
     # Remove dangling images (untagged, orphaned layers)
     echo "   Removing dangling images..."
     $CONTAINER_TOOL image prune -f || {
-        echo "⚠️  Warning: Failed to prune dangling images (this is usually safe to ignore)"
+        echo "   WARNING: Failed to prune dangling images (this is usually safe to ignore)"
     }
     
     # Remove unused images with version compatibility check
@@ -45,13 +47,13 @@ cleanup_dangling_images() {
     if check_until_filter_support; then
         echo "   Using 24-hour filter (keeps recent cache layers)..."
         $CONTAINER_TOOL image prune -a --filter "until=24h" -f || {
-            echo "⚠️  Warning: Failed to prune old images with filter, trying without filter..."
+            echo "   WARNING: Failed to prune old images with filter, trying without filter..."
             $CONTAINER_TOOL image prune -a -f || true
         }
     else
         echo "   Container tool doesn't support 'until' filter, using basic cleanup..."
         $CONTAINER_TOOL image prune -a -f || {
-            echo "⚠️  Warning: Failed to prune images (this is usually safe to ignore)"
+            echo "   WARNING: Failed to prune images (this is usually safe to ignore)"
         }
     fi
     
@@ -59,11 +61,20 @@ cleanup_dangling_images() {
     IMAGES_AFTER=$(get_image_count)
     CLEANED=$((IMAGES_BEFORE - IMAGES_AFTER))
     echo "   Images after cleanup: $IMAGES_AFTER"
-    echo "   ✅ Cleaned up $CLEANED dangling/unused images"
+    echo "   SUCCESS: Cleaned up $CLEANED dangling/unused images"
     
     # Show disk space saved
     echo "   Current disk usage:"
     $CONTAINER_TOOL system df || true
+}
+
+check_builder_prune_support() {
+    # Check if container tool supports 'builder prune' command
+    if $CONTAINER_TOOL builder prune --help &>/dev/null; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 cleanup_build_cache() {
@@ -71,12 +82,21 @@ cleanup_build_cache() {
         return 0
     fi
     
-    echo "🧹 Cleaning up build cache..."
+    echo "INFO: Cleaning up build cache..."
     
-    # Remove build cache (but keep base images)
-    $CONTAINER_TOOL builder prune -f || {
-        echo "⚠️  Note: Build cache cleanup not available (older podman version)"
-    }
+    # Check podman version and builder support
+    if check_builder_prune_support; then
+        echo "   Using podman builder prune for build cache cleanup..."
+        $CONTAINER_TOOL builder prune -f || {
+            echo "   WARNING: Build cache prune failed (this is usually safe to ignore)"
+        }
+    else
+        # Fallback for older podman versions - clean system cache
+        echo "   Using podman system prune for cache cleanup (builder prune not supported)..."
+        $CONTAINER_TOOL system prune -f || {
+            echo "   WARNING: System cache prune failed (this is usually safe to ignore)"
+        }
+    fi
 }
 
 # Allow script to be sourced or executed directly
