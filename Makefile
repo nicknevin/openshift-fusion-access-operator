@@ -216,10 +216,14 @@ run: manifests generate fmt vet ## Run a controller from your host.
 debug: manifests generate fmt vet ## Run and debug a controller from your host.
 	GOOS=${GOOS} GOARCH=${GOARCH} hack/build.sh debug
 
+.PHONY: clean-docker
+clean-docker: ## Clean up all resources created by fusion-access-operator-build.sh script (handles finalizers)
+	@./scripts/cleanup-resources.sh
+
 .PHONY: clean
 clean: ## Remove build artifacts
 	rm -rf ./bundle
-	rm -f manager cover.out coverage.html config/samples/fusionaccess-catalog-*.yaml catalog-template.yaml
+	rm -f ./cover.out ./coverage.html ./config/samples/fusionaccess-catalog-*.yaml catalog-template.yaml
 
 .PHONY: clobber
 clobber: clean ## Remove build artifacts and downloaded tools
@@ -241,6 +245,7 @@ generate-dockerfile-devicefinder:
 generate-dockerfile-console-plugin:
 	envsubst < templates/console-plugin.Dockerfile.template > $(CONSOLE_PLUGIN_DOCKERFILE)
 
+
 .PHONY: validate-cnsa
 validate-cnsa:
 	$(eval CNSA_VERSION := $(shell cat CNSA_VERSION.txt))
@@ -254,6 +259,8 @@ validate-cnsa:
 TARGETARCH ?= amd64
 .PHONY: docker-build
 docker-build: validate-cnsa generate-dockerfile-operator ## Build docker image with the manager.
+	@echo "Building operator image with cache optimization..."
+	@$(CONTAINER_TOOL) pull $(IMAGE_TAG_BASE)-operator:latest 2>/dev/null || true
 	$(CONTAINER_TOOL) build --build-arg TARGETARCH=$(TARGETARCH) -t $(OPERATOR_IMG) -f $(CURPATH)/$(OPERATOR_DOCKERFILE) .
 	$(CONTAINER_TOOL) tag $(OPERATOR_IMG) $(IMAGE_TAG_BASE)-operator:latest
 
@@ -264,14 +271,20 @@ docker-push: ## Push docker image with the manager.
 
 .PHONY: console-build
 console-build: generate-dockerfile-console-plugin ## Build the console image
+	@echo "Building console image with cache optimization..."
+	@$(CONTAINER_TOOL) pull $(CONSOLE_PLUGIN_IMAGE_BASE):latest 2>/dev/null || true
 	$(CONTAINER_TOOL) build -f $(CURPATH)/$(CONSOLE_PLUGIN_DOCKERFILE) -t ${CONSOLE_PLUGIN_IMAGE} .
+	$(CONTAINER_TOOL) tag ${CONSOLE_PLUGIN_IMAGE} $(CONSOLE_PLUGIN_IMAGE_BASE):latest
 .PHONY: console-push
 console-push: ## Push the console image
 	$(CONTAINER_TOOL) push $(CONSOLE_PLUGIN_IMAGE)
 
 .PHONY: devicefinder-docker-build
 devicefinder-docker-build: generate-dockerfile-devicefinder ## Build docker image of the devicefinder
+	@echo "Building devicefinder image with cache optimization..."
+	@$(CONTAINER_TOOL) pull $(IMAGE_TAG_BASE)-devicefinder:latest 2>/dev/null || true
 	$(CONTAINER_TOOL) build -t $(DEVICEFINDER_IMAGE) -f $(CURPATH)/${DEVICEFINDER_DOCKERFILE} .
+	$(CONTAINER_TOOL) tag $(DEVICEFINDER_IMAGE) $(IMAGE_TAG_BASE)-devicefinder:latest
 
 .PHONY: devicefinder-docker-push
 devicefinder-docker-push: ## Push docker image of the devicefinder
@@ -420,6 +433,8 @@ bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metada
 
 .PHONY: bundle-build
 bundle-build: ## Build the bundle image.
+	@echo "Building bundle image with cache optimization..."
+	@$(CONTAINER_TOOL) pull $(IMAGE_TAG_BASE)-bundle:latest 2>/dev/null || true
 	$(CONTAINER_TOOL) build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
 	$(CONTAINER_TOOL) tag $(BUNDLE_IMG) $(IMAGE_TAG_BASE)-bundle:latest
 
@@ -487,19 +502,9 @@ fetchyaml: ## Fetches install yaml files
 tool-versions: opm
 	$(OPM) version
 
-.PHONY: release fbc-push
-ifeq "$(origin VERSION)" "command line"
 release: manifests generate docker-build docker-push console-build console-push devicefinder-docker-build devicefinder-docker-push \
-         bundle bundle-build bundle-push
-fbc-push:
-	podman tag openshift-fusion-access-catalog:latest ${REGISTRY}/openshift-fusion-access-catalog:${CHANNEL}
-	podman push ${REGISTRY}/openshift-fusion-access-catalog:${CHANNEL}
-else
-release fbc-push:
-	@echo "VERSION must be specified on the command line" && false
-endif
+           bundle bundle-build bundle-push
 
-.PHONY: fbc
 fbc:
 	rm -rf catalog catalog.Dockerfile
 	mkdir -p catalog/openshift-fusion-access-operator
@@ -511,6 +516,11 @@ fbc:
 	opm alpha render-template basic catalog-template.yaml -o yaml > catalog/catalog.yaml
 	opm validate catalog
 	podman build . -f catalog.Dockerfile -t openshift-fusion-access-catalog:latest
+	podman tag openshift-fusion-access-catalog:latest ${REGISTRY}/openshift-fusion-access-catalog:latest
+
+fbc-push:
+	podman tag openshift-fusion-access-catalog:latest ${REGISTRY}/openshift-fusion-access-catalog:${CHANNEL}
+	podman push ${REGISTRY}/openshift-fusion-access-catalog:${CHANNEL}
 
 fbc-graph:
 	@opm alpha render-graph catalog
