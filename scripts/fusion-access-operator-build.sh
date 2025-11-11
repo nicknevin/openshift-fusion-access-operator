@@ -347,16 +347,14 @@ if [ $ret -ne 0 ]; then
     exit 1
 fi
 
-# Clean up old images before starting to free disk space
+# Pre-build cleanup: Free disk space before starting
+# Note: Final cleanup handled automatically by EXIT trap
 cleanup_dangling_images
 
 echo "🚀 Building and pushing all images..."
 make VERSION=${VERSION} IMAGE_TAG_BASE=${REGISTRY}/openshift-fusion-access CHANNELS=fast USE_IMAGE_DIGESTS="" \
     manifests bundle generate docker-build docker-push bundle-build bundle-push console-build console-push \
     devicefinder-docker-build devicefinder-docker-push catalog-build catalog-push
-
-# Clean up dangling images created during build
-cleanup_dangling_images
 
 # Verify catalog image exists before proceeding
 verify_catalog_image || echo "⚠️  Image verification failed, continuing anyway..."
