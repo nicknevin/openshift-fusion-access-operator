@@ -222,22 +222,14 @@ clean-docker: ## Clean up all resources created by fusion-access-operator-build.
 
 .PHONY: clean-images
 clean-images: ## Clean up dangling and unused container images to free disk space
-	@echo "🧹 Cleaning up container images..."
-	@IMAGES_BEFORE=$$($(CONTAINER_TOOL) images -a | wc -l); \
-	echo "   Images before cleanup: $$((IMAGES_BEFORE - 1))"; \
-	echo "   Removing dangling images..."; \
-	$(CONTAINER_TOOL) image prune -f || true; \
-	echo "   Removing unused images older than 24 hours..."; \
-	$(CONTAINER_TOOL) image prune -a --filter "until=24h" -f || true; \
-	IMAGES_AFTER=$$($(CONTAINER_TOOL) images -a | wc -l); \
-	CLEANED=$$((IMAGES_BEFORE - IMAGES_AFTER)); \
-	echo "   Images after cleanup: $$((IMAGES_AFTER - 1))"; \
-	echo "   ✅ Cleaned up $$CLEANED images"; \
-	echo "📊 Current disk usage:"; \
-	$(CONTAINER_TOOL) system df || true
+	@CONTAINER_TOOL=$(CONTAINER_TOOL) CLEANUP_IMAGES=true ./scripts/image-cleanup.sh dangling
+
+.PHONY: clean-cache
+clean-cache: ## Clean up container build cache
+	@CONTAINER_TOOL=$(CONTAINER_TOOL) CLEANUP_IMAGES=true ./scripts/image-cleanup.sh cache
 
 .PHONY: clean-all
-clean-all: clean clean-images clean-docker ## Complete cleanup: build artifacts, images, and cluster resources
+clean-all: clean clean-images clean-cache clean-docker ## Complete cleanup: build artifacts, images, cache, and cluster resources
 
 .PHONY: clean
 clean: ## Remove build artifacts

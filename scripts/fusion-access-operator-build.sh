@@ -11,53 +11,24 @@ REGISTRY="${REGISTRY:-kuemper.int.rhx/bandini}"
 CLEANUP_IMAGES="${CLEANUP_IMAGES:-true}"  # Set to false to disable automatic cleanup
 CONTAINER_TOOL="${CONTAINER_TOOL:-podman}"
 
-cleanup_dangling_images() {
-    if [ "$CLEANUP_IMAGES" != "true" ]; then
-        echo "🔧 Image cleanup disabled (CLEANUP_IMAGES=$CLEANUP_IMAGES)"
-        return 0
+# Source shared cleanup utilities  
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/image-cleanup.sh"
+
+# Setup EXIT trap for final cleanup
+cleanup_on_exit() {
+    echo "🎉 Build process completed!"
+    if [ "$CLEANUP_IMAGES" = "true" ]; then
+        echo "🧹 Running final cleanup..."
+        cleanup_dangling_images
+        cleanup_build_cache
+        echo "📊 Final system status:"
+        $CONTAINER_TOOL system df || true
     fi
-    
-    echo "🧹 Cleaning up dangling images to free disk space..."
-    
-    # Count images before cleanup
-    IMAGES_BEFORE=$($CONTAINER_TOOL images -a | wc -l)
-    echo "   Images before cleanup: $((IMAGES_BEFORE - 1))"  # Subtract header line
-    
-    # Remove dangling images (untagged, orphaned layers)
-    echo "   Removing dangling images..."
-    $CONTAINER_TOOL image prune -f || {
-        echo "⚠️  Warning: Failed to prune dangling images (this is usually safe to ignore)"
-    }
-    
-    # Remove unused images older than 24 hours (keeps recent cache layers)
-    echo "   Removing unused images older than 24 hours..."
-    $CONTAINER_TOOL image prune -a --filter "until=24h" -f || {
-        echo "⚠️  Warning: Failed to prune old images (this is usually safe to ignore)"
-    }
-    
-    # Count images after cleanup
-    IMAGES_AFTER=$($CONTAINER_TOOL images -a | wc -l)
-    CLEANED=$((IMAGES_BEFORE - IMAGES_AFTER))
-    echo "   Images after cleanup: $((IMAGES_AFTER - 1))"
-    echo "   ✅ Cleaned up $CLEANED dangling/unused images"
-    
-    # Show disk space saved
-    echo "   Current disk usage:"
-    $CONTAINER_TOOL system df || true
 }
 
-cleanup_build_cache() {
-    if [ "$CLEANUP_IMAGES" != "true" ]; then
-        return 0
-    fi
-    
-    echo "🧹 Cleaning up build cache..."
-    
-    # Remove build cache (but keep base images)
-    $CONTAINER_TOOL builder prune -f || {
-        echo "⚠️  Note: Build cache cleanup not available (older podman version)"
-    }
-}
+# Register cleanup function to run on script exit
+trap cleanup_on_exit EXIT
 
 wait_for_resource() {
     local resource_type=$1  # Either "packagemanifest", "operator", or "csv"
@@ -504,11 +475,5 @@ fi
 
 wait_for_resource "csv" "${INSTALLED_CSV}" "${NS}"
 
-# Final cleanup to remove any remaining dangling images
-echo "🎉 Build and deployment completed successfully!"
-cleanup_dangling_images
-cleanup_build_cache
-
 echo "✅ All done! Operator ${OPERATOR} is now installed and running in namespace ${NS}"
-echo "📊 Final system status:"
-$CONTAINER_TOOL system df || true
+# Note: Final cleanup will be handled automatically by EXIT trap
