@@ -36,26 +36,14 @@ cleanup_dangling_images() {
     IMAGES_BEFORE=$(get_image_count)
     echo "   Images before cleanup: $IMAGES_BEFORE"
     
-    # Remove dangling images (untagged, orphaned layers)
-    echo "   Removing dangling images..."
+    # Remove only dangling images (untagged, orphaned layers) - preserves cache layers
+    echo "   Removing dangling images (preserving build cache)..."
     $CONTAINER_TOOL image prune -f || {
         echo "   WARNING: Failed to prune dangling images (this is usually safe to ignore)"
     }
     
-    # Remove unused images with version compatibility check
-    echo "   Removing unused images..."
-    if check_until_filter_support; then
-        echo "   Using 24-hour filter (keeps recent cache layers)..."
-        $CONTAINER_TOOL image prune -a --filter "until=24h" -f || {
-            echo "   WARNING: Failed to prune old images with filter, trying without filter..."
-            $CONTAINER_TOOL image prune -a -f || true
-        }
-    else
-        echo "   Container tool doesn't support 'until' filter, using basic cleanup..."
-        $CONTAINER_TOOL image prune -a -f || {
-            echo "   WARNING: Failed to prune images (this is usually safe to ignore)"
-        }
-    fi
+    # Note: We do NOT use -a flag here to preserve build cache layers
+    # Only removes truly dangling/orphaned images, keeps intermediate layers for faster rebuilds
     
     # Count images after cleanup
     IMAGES_AFTER=$(get_image_count)
@@ -81,9 +69,9 @@ cleanup_build_cache() {
     if [ "$CLEANUP_IMAGES" != "true" ]; then
         return 0
     fi
-    
+
     echo "INFO: Cleaning up build cache..."
-    
+
     # Check podman version and builder support
     if check_builder_prune_support; then
         echo "   Using podman builder prune for build cache cleanup..."
@@ -99,6 +87,39 @@ cleanup_build_cache() {
     fi
 }
 
+cleanup_all_images() {
+    if [ "$CLEANUP_IMAGES" != "true" ]; then
+        echo "INFO: Image cleanup disabled (CLEANUP_IMAGES=$CLEANUP_IMAGES)"
+        return 0
+    fi
+
+    echo "INFO: Aggressively cleaning up ALL unused images and cache..."
+    echo "WARNING: This will remove build cache and require full rebuilds!"
+    
+    # Count images before cleanup
+    IMAGES_BEFORE=$(get_image_count)
+    echo "   Images before cleanup: $IMAGES_BEFORE"
+    
+    # Remove ALL unused images (including cache layers)
+    echo "   Removing all unused images (including build cache)..."
+    $CONTAINER_TOOL image prune -a -f || {
+        echo "   WARNING: Failed to prune all images (this is usually safe to ignore)"
+    }
+    
+    # Also clean build cache
+    cleanup_build_cache
+    
+    # Count images after cleanup
+    IMAGES_AFTER=$(get_image_count)
+    CLEANED=$((IMAGES_BEFORE - IMAGES_AFTER))
+    echo "   Images after cleanup: $IMAGES_AFTER"
+    echo "   SUCCESS: Cleaned up $CLEANED images and build cache"
+    
+    # Show disk space saved
+    echo "   Current disk usage:"
+    $CONTAINER_TOOL system df || true
+}
+
 # Allow script to be sourced or executed directly
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     # Script is being executed directly, not sourced
@@ -110,8 +131,7 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
             cleanup_build_cache
             ;;
         "all")
-            cleanup_dangling_images
-            cleanup_build_cache
+            cleanup_all_images
             ;;
         *)
             echo "Usage: $0 {dangling|cache|all}"

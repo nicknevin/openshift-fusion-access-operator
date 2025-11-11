@@ -347,7 +347,8 @@ if [ $ret -ne 0 ]; then
     exit 1
 fi
 
-# Pre-build cleanup: Free disk space before starting
+# Pre-build cleanup: Free disk space before starting (preserves build cache)
+# Note: Only removes dangling images, keeps intermediate layers for faster rebuilds
 # Note: Final cleanup handled automatically by EXIT trap
 cleanup_dangling_images
 

@@ -222,15 +222,15 @@ clean-docker: ## Clean up all resources created by fusion-access-operator-build.
 
 # Centralized cleanup using shared utility script
 .PHONY: clean-images
-clean-images: ## Clean up dangling and unused container images
+clean-images: ## Clean up dangling images only (preserves build cache for faster rebuilds)
 	@./scripts/image-cleanup.sh dangling
 
 .PHONY: clean-build-cache  
-clean-build-cache: ## Clean up container build cache
+clean-build-cache: ## Clean up container build cache only
 	@./scripts/image-cleanup.sh cache
 
 .PHONY: clean-all-images
-clean-all-images: ## Clean up all images and build cache
+clean-all-images: ## Clean up ALL images and cache (WARNING: forces full rebuilds)
 	@./scripts/image-cleanup.sh all
 
 .PHONY: clean-all
