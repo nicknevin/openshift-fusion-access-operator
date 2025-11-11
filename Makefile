@@ -220,6 +220,22 @@ debug: manifests generate fmt vet ## Run and debug a controller from your host.
 clean-docker: ## Clean up all resources created by fusion-access-operator-build.sh script (handles finalizers)
 	@./scripts/cleanup-resources.sh
 
+# Centralized cleanup using shared utility script
+.PHONY: clean-images
+clean-images: ## Clean up dangling images only (preserves build cache for faster rebuilds)
+	@./scripts/image-cleanup.sh dangling
+
+.PHONY: clean-build-cache  
+clean-build-cache: ## Clean up container build cache only
+	@./scripts/image-cleanup.sh cache
+
+.PHONY: clean-all-images
+clean-all-images: ## Clean up ALL images and cache (WARNING: forces full rebuilds)
+	@./scripts/image-cleanup.sh all
+
+.PHONY: clean-all
+clean-all: clean clean-all-images clean-docker ## Complete cleanup: build artifacts, images, cache, and cluster resources
+
 .PHONY: clean
 clean: ## Remove build artifacts
 	rm -rf ./bundle

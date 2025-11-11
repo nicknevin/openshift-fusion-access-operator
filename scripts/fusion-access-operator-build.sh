@@ -7,6 +7,29 @@ OPERATOR="openshift-fusion-access-operator"
 VERSION="${VERSION:-6.6.6}"
 REGISTRY="${REGISTRY:-kuemper.int.rhx/bandini}"
 
+# Image cleanup configuration
+CLEANUP_IMAGES="${CLEANUP_IMAGES:-true}"  # Set to false to disable automatic cleanup
+CONTAINER_TOOL="${CONTAINER_TOOL:-podman}"
+
+# Source shared cleanup utilities  
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/image-cleanup.sh"
+
+# Setup EXIT trap for final cleanup
+cleanup_on_exit() {
+    echo "INFO: Build process completed!"
+    if [ "$CLEANUP_IMAGES" = "true" ]; then
+        echo "INFO: Running final cleanup..."
+        cleanup_dangling_images
+        cleanup_build_cache
+        echo "INFO: Final system status:"
+        $CONTAINER_TOOL system df || true
+    fi
+}
+
+# Register cleanup function to run on script exit
+trap cleanup_on_exit EXIT
+
 wait_for_resource() {
     local resource_type=$1  # Either "packagemanifest", "operator", or "csv"
     local name=$2           # Name of the resource (e.g., Operator or CSV)
@@ -25,19 +48,19 @@ wait_for_resource() {
         elif [[ "$resource_type" == "csv" ]]; then
             STATUS=$(oc get csv "$name" -n "$namespace" -o jsonpath='{.status.phase}' 2>/dev/null)
             if [[ "$STATUS" == "Succeeded" ]]; then
-                echo "✅ Operator installation completed successfully!"
+                echo "SUCCESS: Operator installation completed successfully!"
                 break
             fi
             echo "⏳ Operator installation in progress... (Current status: ${STATUS:-Not Found}, attempt $((retry_count + 1))/$max_retries)"
         else
-            echo "❌ Unknown resource type: $resource_type"
+            echo "ERROR: Unknown resource type: $resource_type"
             return 1
         fi
         ret=$?
         set -e
 
         if [[ $ret -eq 0 && "$resource_type" != "csv" ]]; then
-            echo "✅ $resource_type: $name is available!"
+            echo "SUCCESS: $resource_type: $name is available!"
             break
         fi
 
@@ -46,7 +69,7 @@ wait_for_resource() {
     done
 
     if [ $retry_count -eq $max_retries ]; then
-        echo "❌ Error: $resource_type $name was not available after $max_retries attempts (5 minutes)"
+        echo "ERROR: $resource_type $name was not available after $max_retries attempts (5 minutes)"
         return 1
     fi
 }
@@ -65,7 +88,7 @@ wait_for_catalogsource_ready() {
         cs_exists=$?
         
         if [ $cs_exists -ne 0 ]; then
-            echo "⚠️  CatalogSource ${catalogsource_name} not found in namespace ${namespace}, retrying... (attempt $((retry_count + 1))/$max_retries)"
+            echo "WARNING: CatalogSource ${catalogsource_name} not found in namespace ${namespace}, retrying... (attempt $((retry_count + 1))/$max_retries)"
             retry_count=$((retry_count + 1))
             sleep 10
             continue
@@ -97,8 +120,8 @@ wait_for_catalogsource_ready() {
                 oc get pod "${POD_NAME}" -n "${namespace}" -o jsonpath='{.status.containerStatuses[0].state}' 2>/dev/null | xargs -I {} echo "   Container state: {}" || true
             fi
         else
-            echo "✅ CatalogSource ${catalogsource_name} pod ${POD_NAME} is ready!"
-            echo "✅ CatalogSource connection state: ${CS_STATUS:-${CS_GRPC_STATUS}}"
+            echo "SUCCESS: CatalogSource ${catalogsource_name} pod ${POD_NAME} is ready!"
+            echo "SUCCESS: CatalogSource connection state: ${CS_STATUS:-${CS_GRPC_STATUS}}"
             # Wait an additional 10 seconds to ensure gRPC service is fully operational
             echo "⏳ Waiting additional 10 seconds for gRPC service to stabilize..."
             sleep 10
@@ -110,7 +133,7 @@ wait_for_catalogsource_ready() {
     done
 
     if [ $retry_count -eq $max_retries ]; then
-        echo "❌ Error: CatalogSource ${catalogsource_name} was not ready after $max_retries attempts (5 minutes)"
+        echo "ERROR: CatalogSource ${catalogsource_name} was not ready after $max_retries attempts (5 minutes)"
         echo "Checking CatalogSource status:"
         oc get catalogsource "${catalogsource_name}" -n "${namespace}" -o yaml || true
         echo ""
@@ -137,15 +160,15 @@ create_catalog_pull_secret() {
         
         # Check if secret already exists
         if oc get secret quay-pull-secret -n openshift-marketplace &>/dev/null; then
-            echo "✅ Pull secret already exists in openshift-marketplace"
+            echo "SUCCESS: Pull secret already exists in openshift-marketplace"
         else
             echo "Creating pull secret from podman credentials..."
             # Get username from podman
             QUAY_USER=$(podman login --get-login quay.io 2>/dev/null || echo "")
             
             if [ -z "${QUAY_USER}" ]; then
-                echo "⚠️  Could not get quay.io username from podman login"
-                echo "⚠️  Please create the pull secret manually:"
+                echo "WARNING: Could not get quay.io username from podman login"
+                echo "WARNING: Please create the pull secret manually:"
                 echo "   oc create secret docker-registry quay-pull-secret \\"
                 echo "     --docker-server=quay.io \\"
                 echo "     --docker-username=<your-username> \\"
@@ -168,8 +191,8 @@ create_catalog_pull_secret() {
             
             # If still no password, provide instructions
             if [ -z "${QUAY_PASSWORD}" ]; then
-                echo "⚠️  Could not automatically extract quay.io credentials"
-                echo "⚠️  Please create the pull secret manually before running this script:"
+                echo "WARNING: Could not automatically extract quay.io credentials"
+                echo "WARNING: Please create the pull secret manually before running this script:"
                 echo ""
                 echo "   oc create secret docker-registry quay-pull-secret \\"
                 echo "     --docker-server=quay.io \\"
@@ -192,11 +215,11 @@ create_catalog_pull_secret() {
                 --docker-password="${QUAY_PASSWORD}" \
                 --docker-email="" \
                 -n openshift-marketplace || {
-                echo "⚠️  Failed to create pull secret"
+                echo "WARNING: Failed to create pull secret"
                 return 1
             }
             
-            echo "✅ Pull secret created successfully"
+            echo "SUCCESS: Pull secret created successfully"
         fi
         
         # Add secret to default service account in openshift-marketplace
@@ -206,13 +229,13 @@ create_catalog_pull_secret() {
             -p='[{"op": "add", "path": "/imagePullSecrets/-", "value": {"name": "quay-pull-secret"}}]' 2>/dev/null || {
             # Check if it's already there
             if oc get serviceaccount default -n openshift-marketplace -o jsonpath='{.imagePullSecrets[*].name}' | grep -q quay-pull-secret; then
-                echo "✅ Pull secret already added to default service account"
+                echo "SUCCESS: Pull secret already added to default service account"
             else
-                echo "⚠️  Failed to add pull secret to default service account (may already exist)"
+                echo "WARNING: Failed to add pull secret to default service account (may already exist)"
             fi
         }
         
-        echo "✅ Image pull secret configured for openshift-marketplace namespace"
+        echo "SUCCESS: Image pull secret configured for openshift-marketplace namespace"
         echo "   Note: Pull secret will be added to CatalogSource service account after CatalogSource is created"
     else
         echo "Registry ${REGISTRY_HOST} detected, skipping pull secret setup"
@@ -248,7 +271,7 @@ cleanup_old_catalogsource() {
     # Force delete any remaining pods
     oc delete pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" --ignore-not-found=true --force --grace-period=0 || true
     
-    echo "✅ Cleanup completed"
+    echo "SUCCESS: Cleanup completed"
 }
 
 verify_catalog_image() {
@@ -259,16 +282,16 @@ verify_catalog_image() {
     if command -v podman &> /dev/null; then
         echo "Checking if catalog image exists: ${catalog_image}"
         if podman pull "${catalog_image}" &>/dev/null; then
-            echo "✅ Catalog image exists and is accessible"
+            echo "SUCCESS: Catalog image exists and is accessible"
             return 0
         else
-            echo "⚠️  Warning: Could not pull catalog image ${catalog_image}"
+            echo "WARNING: Could not pull catalog image ${catalog_image}"
             echo "   This might be due to authentication issues or the image doesn't exist"
             echo "   The script will continue, but the CatalogSource may fail to start"
             return 1
         fi
     else
-        echo "⚠️  podman not found, skipping image verification"
+        echo "WARNING: podman not found, skipping image verification"
         return 0
     fi
 }
@@ -324,15 +347,21 @@ if [ $ret -ne 0 ]; then
     exit 1
 fi
 
+# Pre-build cleanup: Free disk space before starting (preserves build cache)
+# Note: Only removes dangling images, keeps intermediate layers for faster rebuilds
+# Note: Final cleanup handled automatically by EXIT trap
+cleanup_dangling_images
+
+echo "INFO: Building and pushing all images..."
 make VERSION=${VERSION} IMAGE_TAG_BASE=${REGISTRY}/openshift-fusion-access CHANNELS=fast USE_IMAGE_DIGESTS="" \
     manifests bundle generate docker-build docker-push bundle-build bundle-push console-build console-push \
     devicefinder-docker-build devicefinder-docker-push catalog-build catalog-push
 
 # Verify catalog image exists before proceeding
-verify_catalog_image || echo "⚠️  Image verification failed, continuing anyway..."
+verify_catalog_image || echo "WARNING: Image verification failed, continuing anyway..."
 
 # Setup image pull secret for CatalogSource if needed (do this BEFORE creating CatalogSource)
-create_catalog_pull_secret || echo "⚠️  Pull secret setup skipped, ensure images are publicly accessible or configure manually"
+create_catalog_pull_secret || echo "WARNING: Pull secret setup skipped, ensure images are publicly accessible or configure manually"
 
 # Clean up old CatalogSource resources before creating new ones
 # This must be done BEFORE creating CatalogSource to ensure clean state
@@ -340,7 +369,7 @@ cleanup_old_catalogsource "${CATALOGSOURCE}" "openshift-marketplace"
 
 # Double-check: if CatalogSource still exists, delete it again (might have been recreated)
 if oc get catalogsource "${CATALOGSOURCE}" -n openshift-marketplace &>/dev/null; then
-    echo "⚠️  CatalogSource still exists after cleanup, force deleting..."
+    echo "WARNING: CatalogSource still exists after cleanup, force deleting..."
     oc delete catalogsource "${CATALOGSOURCE}" -n openshift-marketplace --ignore-not-found=true --wait=true --timeout=30s || true
     # Wait and ensure all pods are gone
     sleep 5
@@ -365,13 +394,13 @@ if [[ "${REGISTRY_HOST}" == "quay.io" ]] && oc get secret quay-pull-secret -n op
         -p='[{"op": "add", "path": "/imagePullSecrets/-", "value": {"name": "quay-pull-secret"}}]' 2>/dev/null || {
         # Check if it's already there
         if oc get serviceaccount "${CATALOGSOURCE}" -n openshift-marketplace -o jsonpath='{.imagePullSecrets[*].name}' 2>/dev/null | grep -q quay-pull-secret; then
-            echo "✅ Pull secret already added to CatalogSource service account"
+            echo "SUCCESS: Pull secret already added to CatalogSource service account"
         else
-            echo "⚠️  Adding pull secret to CatalogSource service account..."
+            echo "WARNING: Adding pull secret to CatalogSource service account..."
             # Try alternative method if patch fails
             oc get serviceaccount "${CATALOGSOURCE}" -n openshift-marketplace -o json | \
                 jq '.imagePullSecrets = (.imagePullSecrets // []) + [{"name": "quay-pull-secret"}]' | \
-                oc apply -f - 2>/dev/null || echo "⚠️  Could not add pull secret, you may need to add it manually"
+                oc apply -f - 2>/dev/null || echo "WARNING: Could not add pull secret, you may need to add it manually"
         fi
     }
     # Delete any existing pods to force recreation with new service account config
@@ -387,7 +416,7 @@ if [[ "${REGISTRY_HOST}" == "quay.io" ]] && oc get secret quay-pull-secret -n op
     # Wait a moment for pods to be fully deleted
     sleep 3
     
-    echo "✅ Pull secret configured for CatalogSource service account"
+    echo "SUCCESS: Pull secret configured for CatalogSource service account"
 fi
 
 echo "Waiting for CatalogSource to be ready before proceeding..."
@@ -407,9 +436,9 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     set -e
     
     if [ $ret -ne 0 ]; then
-        echo "⚠️  Subscription ${OPERATOR} not found in namespace ${NS}, retrying... (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)"
+        echo "WARNING: Subscription ${OPERATOR} not found in namespace ${NS}, retrying... (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)"
     elif [ -n "${INSTALLED_CSV}" ]; then
-        echo "✅ CSV installed: ${INSTALLED_CSV}"
+        echo "SUCCESS: CSV installed: ${INSTALLED_CSV}"
         break
     else
         echo "⏳ Waiting for CSV to be installed... (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)"
@@ -421,7 +450,7 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
             echo "   Subscription status: ${SUB_STATUS}"
         fi
         if [ -n "${RESOLUTION_ERROR}" ]; then
-            echo "   ⚠️  Resolution error: ${RESOLUTION_ERROR}"
+            echo "   WARNING: Resolution error: ${RESOLUTION_ERROR}"
             # If there's a resolution error, check CatalogSource pod status
             CS_POD=$(oc get pod -n openshift-marketplace -l "olm.catalogSource=${CATALOGSOURCE}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
             if [ -n "${CS_POD}" ]; then
@@ -437,10 +466,13 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
 done
 
 if [ -z "${INSTALLED_CSV}" ]; then
-    echo "❌ Error: CSV was not installed after $MAX_RETRIES attempts (5 minutes)"
+    echo "ERROR: CSV was not installed after $MAX_RETRIES attempts (5 minutes)"
     echo "Checking subscription status:"
     oc get subscription "${OPERATOR}" -n "${NS}" -o yaml || true
     exit 1
 fi
 
 wait_for_resource "csv" "${INSTALLED_CSV}" "${NS}"
+
+echo "SUCCESS: All done! Operator ${OPERATOR} is now installed and running in namespace ${NS}"
+# Note: Final cleanup will be handled automatically by EXIT trap
