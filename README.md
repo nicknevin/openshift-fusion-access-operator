@@ -257,19 +257,9 @@ You can customize the configurations in `.vscode/launch.json` to match your envi
 
 ### Building and Deploying Operator
 
-For building container images and deploying the operator to your cluster:
+**📖 See [docs/BUILD_AND_DEPLOY.md](docs/BUILD_AND_DEPLOY.md) for complete build and deployment instructions**
 
-**📖 See [docs/BUILD_AND_DEPLOY.md](docs/BUILD_AND_DEPLOY.md) for complete instructions**
-
-The build documentation covers:
-- Automated build and deployment with `fusion-access-operator-build.sh`
-- Manual build process step-by-step
-- Image registry configuration
-- Pull secret setup
-- Troubleshooting common build issues
-- Build stability improvements and fixes
-
-### Troubleshooting
+### Local Development Troubleshooting
 
 #### Cannot Connect to Cluster
 
@@ -284,8 +274,8 @@ kubectl auth can-i create crds --all-namespaces
 
 #### Webhook Certificate Errors
 
-If you see webhook certificate errors:
-- Set `ENABLE_WEBHOOKS=false` for local development
+If you see webhook certificate errors during local development:
+- Set `ENABLE_WEBHOOKS=false` for local development (recommended)
 - Or ensure certificates exist at `/tmp/k8s-webhook-server/serving-certs/`
 
 #### CRDs Not Found
