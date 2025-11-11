@@ -53,3 +53,5 @@ govulncheck.results
 # preflight outputs
 artifacts/
 preflight.log
+# Temp files
+Temp/*
