@@ -48,11 +48,14 @@ oc cluster-info
 ```
 
 The script automatically:
+- **Cleans up old images** before starting (frees disk space)
 - Builds all images (operator, console, devicefinder, bundle, catalog)
 - Pushes images to your registry
+- **Cleans up dangling images** after build (removes intermediate layers)
 - Sets up pull secrets
 - Creates CatalogSource
 - Installs operator via Subscription
+- **Final cleanup** removes remaining unused images
 
 ## Manual Build Process
 
@@ -244,18 +247,112 @@ oc get secret fusion-pullsecret -n ibm-fusion-access -o jsonpath='{.data.ibm-ent
 
 ## Cleanup
 
-To remove all resources created by the build script:
+### Complete Cleanup (Recommended)
 
+For a complete cleanup of everything (resources + images):
+
+```bash
+make clean-all
+```
+
+This performs all cleanup operations in sequence:
+- Removes build artifacts (`make clean`)
+- Cleans up dangling container images (`make clean-images`)  
+- Removes operator resources (`make clean-docker`)
+
+### Individual Cleanup Options
+
+**Clean up operator resources:**
 ```bash
 make clean-docker
 ```
 
-This removes:
+Removes:
 - Subscription, CSV, Operator
-- OperatorGroup
+- OperatorGroup  
 - CatalogSource
 - Namespace `ibm-fusion-access`
 - All associated resources (handles finalizers)
+
+**Clean up container images:**
+```bash
+make clean-images
+```
+
+Removes:
+- Dangling images (`<none>` repository/tag)
+- Unused images older than 24 hours
+- Orphaned build layers
+- Shows disk space freed
+
+**Clean up build artifacts only:**
+```bash
+make clean
+```
+
+Removes:
+- Bundle files
+- Generated YAML files
+- Coverage reports
+
+## Automated Image Cleanup
+
+### Overview
+
+The build process now includes **automated image cleanup** to prevent disk space accumulation from dangling images. This addresses the common problem where container builds leave behind numerous `<none>` tagged images.
+
+### How It Works
+
+**Three-Stage Cleanup Process:**
+
+1. **Pre-Build Cleanup**: Removes old dangling images before starting
+2. **Post-Build Cleanup**: Removes intermediate layers created during build  
+3. **Final Cleanup**: Comprehensive cleanup after successful deployment
+
+### Cleanup Strategy
+
+- **Safe**: Preserves tagged images and recent cache layers
+- **Smart**: Only removes images older than 24 hours (keeps build cache)
+- **Comprehensive**: Includes build cache and unused layers
+- **Configurable**: Can be disabled with `CLEANUP_IMAGES=false`
+
+### Benefits
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| **Disk Space** | Accumulates indefinitely | Managed automatically | **Prevents bloat** |
+| **Build Performance** | Slower over time | Consistent performance | **Maintains speed** |
+| **Manual Intervention** | Required cleanup | Fully automated | **Zero maintenance** |
+
+### Example Output
+
+```bash
+🧹 Cleaning up dangling images to free disk space...
+   Images before cleanup: 157
+   Removing dangling images...
+   Removing unused images older than 24 hours...
+   Images after cleanup: 42
+   ✅ Cleaned up 115 dangling/unused images
+📊 Current disk usage:
+TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE
+Images          42        12        8.5GB     2.1GB
+Containers      0         0         0B        0B
+Local Volumes   3         0         1.2MB     1.2MB (100%)
+Build Cache     0         0         0B        0B
+```
+
+### Manual Cleanup Commands
+
+```bash
+# Clean images only
+make clean-images
+
+# Clean everything (recommended)
+make clean-all
+
+# Disable automatic cleanup
+CLEANUP_IMAGES=false ./scripts/fusion-access-operator-build.sh
+```
 
 ## Environment Variables Reference
 
@@ -272,6 +369,7 @@ This removes:
 - `CATALOG_IMG` - Catalog image URL
 - `CHANNELS` - Bundle channels (default: `fast`)
 - `CONTAINER_TOOL` - Container tool to use (default: `podman`)
+- `CLEANUP_IMAGES` - Enable automatic image cleanup (default: `true`)
 
 ## Build Issues and Solutions
 
