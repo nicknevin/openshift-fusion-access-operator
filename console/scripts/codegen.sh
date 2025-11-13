@@ -11,6 +11,7 @@ WELL_KNOWN_CRDS=(
   [Filesystem]='filesystems.scale.spectrum.ibm.com'
   [LocalDisk]='localdisks.scale.spectrum.ibm.com'
   [FusionAccess]='fusionaccesses.fusion.storage.openshift.io'
+  [FileSystemClaim]='filesystemclaims.fusion.storage.openshift.io'
   [LocalVolumeDiscoveryResult]='localvolumediscoveryresults.fusion.storage.openshift.io'
 )
 
@@ -48,7 +49,7 @@ generate_type_from_schema() {
   local version="$2"
   
   local schema_temp_file
-  schema_temp_file="$(mktemp -t "$crd_name.XXXXXX")"
+  schema_temp_file="$(mktemp -t "$crd_name")"
   # shellcheck disable=SC2064
   trap "rm -f $schema_temp_file" EXIT
   
@@ -69,6 +70,7 @@ generate_plugin_types() {
   for crd_name in "${!WELL_KNOWN_CRDS[@]}"; do
     # Get all versions for this CRD
     for version in $(get_crd_versions "$crd_name"); do
+      echo "[info] Generating $crd_name ($version)"
       generate_type_from_schema "$crd_name" "$version"
     done
   done
@@ -124,29 +126,6 @@ generate_openshift_types() {
   echo "[info] Cleaning up"
   find "$output_dir" -mindepth 1 -not -name 'types.ts' -exec rm -rf {} +
   echo "[info] Done"
-}
-
-generate_kubernetes_types() {
-  local version
-  version="${1:-$(get_cluster_versions | jq -r '.kubernetes' | awk -F '.' '{print $1"."$2}')}"
-
-  local config_temp_file
-  config_temp_file="$(mktemp -t "openapitools-kubernetes.json")"
-  # shellcheck disable=SC2064
-  trap "rm -f $config_temp_file" EXIT
-  
-  sed 's/%VERSION%/'"$version"'/g' config/openapitools.json > "$config_temp_file"
-
-  local output_dir
-  output_dir="$(jq -r '.["generator-cli"].generators.kubernetes.output' "$config_temp_file")"
-
-  mkdir -p "$output_dir"
-  npx openapi-generator-cli generate \
-    --generator-key kubernetes \
-    --openapitools "$config_temp_file"
-
-  cp "$output_dir/models/index.ts" "$output_dir/types.ts"
-  find "$output_dir" -mindepth 1 -not -name 'types.ts' -exec rm -rf {} +
 }
 
 "$@"
